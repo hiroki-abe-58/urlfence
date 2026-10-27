@@ -143,9 +143,10 @@ and JSON output are ordinary code, covered by tests.
   They include the CVE-style prefix and suffix mistakes, a wrong authority boundary, and accepting
   octal IPv4 parts. So far every one fails the build, and the script names the file: a theorem or a
   build-time example. Some fail only because a proof script no longer fits the changed code, not
-  because a statement became false. Three of them change only the reason for a rejection, since the
-  host grammar refuses those characters anyway: dropping the userinfo check, the percent check or
-  the backslash check.
+  because a statement became false. Dropping the userinfo check or the percent check changes only
+  the reason for a rejection, since the host grammar refuses those characters anyway. Dropping the
+  backslash check also lets a backslash through in the path, query or fragment, with the host
+  unchanged.
 
 ## Usage
 
