@@ -25,6 +25,7 @@ PAGES = {
     ("docs.example.com", "/sneaky"): (302, {"Location": "http://docs.example.com@evil.example.net/"}, b""),
     ("docs.example.com", "/loop"): (302, {"Location": "/loop"}, b""),
     ("docs.example.com", "/broken"): (404, {"Transfer-Encoding": "chunked"}, b"zz\r\n"),
+    ("docs.example.com", "/large"): (200, {}, b"z" * 50_000),
 }
 for code in (301, 302, 303, 307, 308):
     PAGES[("docs.example.com", f"/leave{code}")] = (code, {"Location": "http://evil.example.net/collect"}, b"")
@@ -126,6 +127,10 @@ class GuardedFetch(unittest.TestCase):
     def test_a_broken_answer_refuses(self):
         with self.assertRaises(gf.Refused):
             self.fetch("http://docs.example.com/broken")
+
+    def test_the_body_is_cut_at_max_bytes(self):
+        status, body, _ = self.fetch("http://docs.example.com/large", max_bytes=1000)
+        self.assertEqual((status, body), (200, b"z" * 1000))
 
 
 def urlfence_says(code, stdout, stderr=b""):

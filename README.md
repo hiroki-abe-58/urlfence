@@ -168,8 +168,8 @@ and JSON output are ordinary code, covered by tests.
   versions, not proofs.
 * `tests/test_guarded_fetch.py` runs the example against the real binary and an HTTP proxy on
   127.0.0.1 that stands in for the web: a redirect to another host, or to a URL with userinfo, is
-  refused before it is requested. Unusable answers from the binary, simulated by replacing
-  `subprocess.run`, refuse.
+  refused before it is requested, and the body is cut at `max_bytes`. Unusable answers from the
+  binary, simulated by replacing `subprocess.run`, refuse.
 * `tests/mutants.py` plants 15 plausible bugs, one at a time, and requires each one to be caught.
   They include the CVE-style prefix and suffix mistakes, a wrong authority boundary, and accepting
   octal IPv4 parts. So far every one fails the build, and the script names the file: a theorem or a
@@ -197,7 +197,16 @@ lake build
 urlfence check --allow PATTERN ... [--deny PATTERN ...] [--scheme http|https ...] [--stdin] [-- URL ...]
 ```
 
-* URLs go after `--`, or one per line on stdin with `--stdin`.
+* URLs go after `--`, or one per line on stdin with `--stdin`. Stdin is read whole before the
+  first answer.
+* For a given policy, time and memory grow linearly with the input. On an Intel Core Ultra 9 285K (WSL2), 1,000,000
+  URLs on stdin (24 MB) took 2.7 s and 600 MiB, and one 16 MB URL 1.5 s and 1.6 GiB: expect
+  roughly 25 to 100 times the input size in memory, and split very large batches. These are
+  measurements: the theorems say nothing about time or memory. When memory runs out, the process
+  is killed by a signal, or, if an allocation fails (under `ulimit -v`, say), it prints `INTERNAL
+  PANIC: out of memory` and exits with status 1, possibly after some result lines. Use the output
+  only if it has exactly one result line per input and the exit status matches the decisions;
+  anything else is a failure, not an answer.
 * One ASCII JSON object per URL: `decision` is `allow`, `deny` or `reject`, with `scheme`, `host` and
   `port`, or a `reason`.
 * Exit status: 0 if at least one URL was checked and all are allowed, 1 otherwise, and 2 for a usage
@@ -213,7 +222,9 @@ URLFence's answer is one JSON object for exactly that URL with a matching exit s
 (GET) exactly the checked string, and checks each redirect target before following it. It returns
 `(status, body, hops)` for the last response, whatever its status, or raises `Refused` (refused,
 or the request failed). It does nothing about DNS, the port or the path, or what a proxy or the
-server does with the URL (see below).
+server does with the URL (see below). It bounds the body (`max_bytes`) and the number of
+redirects, but `TIMEOUT` applies to each socket operation, not to the whole fetch: a server that
+sends slowly can hold a fetch for much longer than `TIMEOUT`.
 
 From Lean, build a policy with `UrlFence.Policy.make` and call `Policy.checkString`.
 
