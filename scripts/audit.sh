@@ -48,6 +48,7 @@ fi
 # 3. Environment: imports, replaced implementations, axioms of every declaration, and the published
 #    statements with the definitions they depend on.
 out=$(lake env lean scripts/Axioms.lean)
+! grep '^BADNAME ' <<<"$out" || fail "a library name contains whitespace"
 canon_file=$(mktemp); trap 'rm -f "$canon_file"' EXIT
 grep '^CANON ' <<<"$out" > "$canon_file"
 # SHA-256 of a theorem's printed statement and the raw terms of everything it depends on.
@@ -55,7 +56,10 @@ depsha() {
   local deps n
   deps=$(grep -F "DEPS $1 " <<<"$out" | cut -d' ' -f3-) || return 1
   { grep -F "STATEMENT $1 : " <<<"$out"
-    for n in $deps; do awk -v n="$n" '$1 == "CANON" && $2 == n' "$canon_file"; done
+    for n in $deps; do
+      [ "$(awk -v n="$n" '$1 == "CANON" && $2 == n' "$canon_file" | wc -l)" = 1 ] || return 1
+      awk -v n="$n" '$1 == "CANON" && $2 == n' "$canon_file"
+    done
   } | sha256sum | cut -d' ' -f1
 }
 published_lines=""

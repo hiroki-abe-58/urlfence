@@ -58,7 +58,8 @@ def canon (ci : ConstantInfo) : String :=
     | .inductInfo v => s!" ctors={v.ctors} params={v.numParams} indices={v.numIndices}"
     | .ctorInfo v => s!" induct={v.induct} cidx={v.cidx} fields={v.numFields}"
     | _ => ""
-  s!"{ci.type} := {value}{family}".replace "\n" " "
+  -- Escape, not replace: a string literal "a\nb" must not print like "a b".
+  (s!"{ci.type} := {value}{family}").replace "\\" "\\\\" |>.replace "\n" "\\n"
 
 run_cmd do
   let env ← getEnv
@@ -78,6 +79,9 @@ run_cmd do
       | .axiomInfo _ => "axiom"
       | .opaqueInfo _ => "opaque"
       | _ => "def"
+    -- Names are split on spaces below; refuse any that contain whitespace.
+    if name.toString.any Char.isWhitespace then
+      lines := lines.push s!"BADNAME {name}"
     lines := lines.push s!"CANON {name} {canon ci}"
     let axs ← collectAxioms name
     lines := lines.push s!"AXIOMS {kind} {name}: {axs.toList}"
