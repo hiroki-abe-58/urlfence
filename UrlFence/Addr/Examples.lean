@@ -1,4 +1,4 @@
-import UrlFence.Addr.Check
+import UrlFence.Addr.Explain
 
 /-!
 # Address examples, checked at build time
@@ -118,5 +118,44 @@ def withNat64 : Config := { nat64 := [ip6 [0x64, 0xff9b, 0, 0, 0, 0, 0, 0]] }
 #guard (parseString "2001:db8:0:1:0:0:0:1").map toString = some "2001:db8:0:1::1"
 #guard (parseString "2001:db8:0:1:1:1:1:1").map toString = some "2001:db8:0:1:1:1:1:1"
 #guard (parseString "1:2:3:4:5:6:7::").map toString = some "1:2:3:4:5:6:7:0"
+
+/-- The reason `explain` gives for `s`. -/
+def why (cfg : Config) (s : String) : String :=
+  match parseString s with
+  | none => "reject"
+  | some a =>
+    match cfg.explain a with
+    | none => "allowed"
+    | some w => w.text
+
+-- Reasons name the first rule that denies, and the IPv4 address inside an IPv6 one.
+#guard why plain "127.0.0.1" = "registry 127.0.0.0/8 Loopback"
+#guard why plain "0.0.0.0" = "registry 0.0.0.0/8 \"This network\""
+#guard why plain "192.0.0.9" = "registry 192.0.0.0/24 IETF Protocol Assignments"
+#guard why plain "224.0.0.1" = "multicast 224.0.0.0/4"
+#guard why plain "::ffff:169.254.169.254" = "mapped 169.254.169.254: registry 169.254.0.0/16 Link Local"
+#guard why withNat64 "64:ff9b::a00:1" = "nat64-embedded 10.0.0.1: registry 10.0.0.0/8 Private-Use"
+#guard why plain "64:ff9b::a00:1" = "outside 2000::/3"
+#guard why plain "2606:4700::200:5efe:a9fe:a9fe" =
+  "isatap 169.254.169.254: registry 169.254.0.0/16 Link Local"
+#guard why plain "2002:7f00:1::" = "registry 2002::/16 6to4"
+#guard why plain "2001:0:4136:e378:8000:63bf:3fff:fdd2" = "registry 2001::/23 IETF Protocol Assignments"
+#guard why { deny4 := [⟨ip4 8 8 8 0, 24⟩] } "::ffff:8.8.8.8" = "mapped 8.8.8.8: deny 8.8.8.0/24"
+#guard why { deny6 := [⟨ip6 [0x2606, 0x4700, 0, 0, 0, 0, 0, 0], 32⟩] } "2606:4700:4700::1111" =
+  "deny 2606:4700::/32"
+#guard why plain "8.8.8.8" = "allowed"
+#guard why plain "fe80::1%eth0" = "reject"
+-- Prefixes: the strict form, no bits after the length.
+#guard parsePrefixString "10.0.0.0/8" = some (.v4 ⟨ip4 10 0 0 0, 8⟩)
+#guard parsePrefixString "64:ff9b::/96" = some (.v6 ⟨ip6 [0x64, 0xff9b, 0, 0, 0, 0, 0, 0], 96⟩)
+#guard parsePrefixString "::/0" = some (.v6 ⟨ip6 [0, 0, 0, 0, 0, 0, 0, 0], 0⟩)
+#guard parsePrefixString "10.0.0.1/8" = none
+#guard parsePrefixString "10.0.0.0/08" = none
+#guard parsePrefixString "10.0.0.0/33" = none
+#guard parsePrefixString "10.0.0.0" = none
+#guard parsePrefixString "10.0.0.0/" = none
+#guard parsePrefixString "::/129" = none
+#guard parsePrefixString "fe80::/10/1" = none
+#guard parsePrefixString "[::]/0" = none
 
 end UrlFence.Addr.Examples

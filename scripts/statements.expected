@@ -98,3 +98,9 @@ STATEMENT UrlFence.Addr.render6_canonical : ∀ (a : BitVec 128), (∃ i n, 2 �
 DEPSHA UrlFence.Addr.render6_canonical 48a84abcf06226b4ba68930c111878fbede6e1c74248f3fc59c54d8f165b4832
 STATEMENT UrlFence.Addr.hex16_canonical : ∀ (n : Nat), n < 65536 → (∀ (c : Char), c ∈ UrlFence.Addr.hex16 n → UrlFence.isDigit c = true ∨ 'a' ≤ c ∧ c ≤ 'f') ∧ 0 < (UrlFence.Addr.hex16 n).length ∧ (UrlFence.Addr.hex16 n).length ≤ 4 ∧ (UrlFence.Addr.hex16 n = ['0'] ∨ (UrlFence.Addr.hex16 n).head? ≠ some '0')
 DEPSHA UrlFence.Addr.hex16_canonical 880f493bc4730949907789d6d338fe1f37eea0095f38e087e0eefb89009e00c9
+STATEMENT UrlFence.Addr.explain_eq_none_iff : ∀ (cfg : UrlFence.Addr.Config) (a : UrlFence.Addr), cfg.explain a = none ↔ cfg.allows a = true
+DEPSHA UrlFence.Addr.explain_eq_none_iff e7663264f12281819a74aaab2a01d17cbc6adebd6396f096b0bb3d53027e6d0f
+STATEMENT UrlFence.Addr.parsePrefix_v4 : ∀ (s : List Char) (p : UrlFence.Addr.Prefix 32), UrlFence.Addr.parsePrefix s = some (UrlFence.Addr.AnyPrefix.v4 p) → p.len ≤ 32 ∧ p.base.toNat % 2 ^ (32 - p.len) = 0
+DEPSHA UrlFence.Addr.parsePrefix_v4 323189df1772d846586999227a354d77f8b03faa9f4c61fb2bcd6e8ef7650e86
+STATEMENT UrlFence.Addr.parsePrefix_v6 : ∀ (s : List Char) (p : UrlFence.Addr.Prefix 128), UrlFence.Addr.parsePrefix s = some (UrlFence.Addr.AnyPrefix.v6 p) → p.len ≤ 128 ∧ p.base.toNat % 2 ^ (128 - p.len) = 0
+DEPSHA UrlFence.Addr.parsePrefix_v6 4fa87b0b65413462cbd4eb8affabb4b81954bf593d79cb9a99e0a8440bbaaa68
