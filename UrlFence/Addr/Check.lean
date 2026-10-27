@@ -10,20 +10,25 @@ internal address. `Config.check` decides whether a resolved address may be conne
   `True` (`False`, `N/A` or empty), in 224.0.0.0/4 (multicast), or in a prefix the caller denies.
   A row that is not globally reachable denies all of its block, even where a more specific row says
   `True`: all of 192.0.0.0/24 is denied, including 192.0.0.9 and 192.0.0.10. This is stricter than
-  the registry.
+  the registry, on purpose: those anycast addresses (PCP 192.0.0.9 and 2001:1::1, TURN 192.0.0.10
+  and 2001:1::2, SRP 2001:1::3 in 2001::/23 below) are answered by the local gateway or border
+  routers, which a request made for an agent should not reach.
 * **IPv6 that carries an IPv4 address in its last 32 bits** (`Config.embeds`): IPv4-mapped
-  addresses (`::ffff:0:0/96`), and the NAT64 prefixes that the caller configures (`Config.nat64`,
-  for example the well-known `64:ff9b::/96`). Such an address gets the decision of the IPv4 address
-  it carries. A configured NAT64 prefix is honoured only if it is `64:ff9b::/96`, or a /96 inside
-  2000::/3 that has no address in common with a row that is not globally reachable (`nat64Ok`).
-  Other configured prefixes are ignored, so their addresses get the decision below.
+  addresses (`::ffff:0:0/96`), and the NAT64 /96 prefixes that the caller configures
+  (`Config.nat64`, for example the well-known `64:ff9b::/96`). Such an address gets the decision of
+  the IPv4 address it carries. A configured NAT64 prefix is honoured only if it is `64:ff9b::/96`,
+  or a /96 inside 2000::/3 that has no address in common with a row that is not globally reachable
+  (`nat64Ok`). Other configured prefixes are not honoured, and their addresses are denied: they are
+  outside 2000::/3 or in such a row (in `::ffff:0:0/96` they are decided as IPv4-mapped). The
+  command-line tool refuses such a prefix rather than ignoring it.
 * **Other IPv6**: allowed only inside 2000::/3, and denied there if it is in a row of the IPv6
   registry that is not globally reachable (all of 2001::/23 including Teredo, 2001:db8::/32,
-  2002::/16 for 6to4, 3fff::/20), if its interface identifier is an ISATAP one (`0000:5efe` or
-  `0200:5efe`, then an IPv4 address) whose IPv4 address is denied, or if it is in a prefix the
-  caller denies. Everything outside 2000::/3 is therefore denied unless it carries an IPv4 address
-  as above: `::/96` (IPv4-compatible), `64:ff9b:1::/48`, `100::/64`, `5f00::/16`, `fc00::/7`,
-  `fe80::/10`, `fec0::/10`, `ff00::/8` and the rest.
+  2002::/16 for 6to4, 3fff::/20), if its interface identifier is an ISATAP one (`0000:5efe`, with
+  the u and g bits of RFC 5214, section 6.1 allowed: `0100:5efe`, `0200:5efe`, `0300:5efe`; then an
+  IPv4 address) whose IPv4 address is denied, or if it is in a prefix the caller denies. Everything
+  outside 2000::/3 is therefore denied unless it carries an IPv4 address as above: `::/96`
+  (IPv4-compatible), `64:ff9b:1::/48`, `100::/64`, `5f00::/16`, `fc00::/7`, `fe80::/10`,
+  `fec0::/10`, `ff00::/8` and the rest.
 
 A prefix the caller denies for IPv6 applies to every IPv6 address, including the mapped and NAT64
 ones; one denied for IPv4 applies to every IPv4 address, including those carried in IPv6.
@@ -31,10 +36,25 @@ ones; one denied for IPv4 applies to every IPv4 address, including those carried
 The decision is characterised exactly (`allows4_iff`, `allows6_iff`, `embeds_iff`, `nat64Ok_iff`,
 `check_allow_iff`). Every address in a row that is not globally reachable is denied
 (`registry4_denied`, `registry6_denied`; for IPv6 except `::ffff:0:0/96`, whose addresses get the
-IPv4 decision). The encodings of an IPv4 address in IPv6 do not get around the IPv4 decision:
-mapped (`mapped_denied`), NAT64 (`nat64_denied`, `nat64_allows_iff`) and ISATAP (`isatap_denied`);
-6to4 and Teredo addresses are always denied (`sixToFour_denied`, `teredo_denied`). Denying another
-prefix never allows more (`allows_of_add_deny4`, `allows_of_add_deny6`).
+IPv4 decision). Configuring NAT64 prefixes allows nothing more than the well-known prefix with an
+allowed IPv4 address in it, or what the generic IPv6 rule already allows (`allows_nat64_wellKnown`).
+Denying another prefix never allows more (`allows_of_add_deny4`, `allows_of_add_deny6`).
+
+**Which encodings of IPv4 in IPv6 are decoded.** Only these: IPv4-mapped (`mapped_denied`), the
+configured /96 NAT64 prefixes (`nat64_denied`, `nat64_allows_iff`) and ISATAP interface identifiers
+(`isatap_denied`); 6to4 and Teredo addresses are always denied (`sixToFour_denied`,
+`teredo_denied`). Others are not decoded, and an address that uses one inside 2000::/3 is decided
+as a plain global address: a network-specific NAT64 prefix that is not configured (RFC 6052,
+section 3.1 forbids non-global IPv4 addresses only in the well-known prefix, so
+`2a00:1450:64::a00:1`, carrying 10.0.0.1, is allowed), the RFC 6052 prefix lengths 32, 40, 48, 56
+and 64 (which put the IPv4 address elsewhere and cannot be configured), 6rd, MAP-E and MAP-T, and
+SIIT-EAM. A network that uses one of these must put its prefixes in `deny6`.
+
+**What the registries do not know.** Internal services on global addresses are allowed unless the
+caller denies them: a cloud provider's host endpoints (for example Azure's 168.63.129.16), an
+organisation's own public IPv4 and IPv6 ranges. Put them in `deny4` and `deny6`. The tables are a
+snapshot (2025-10-09): a block that IANA later adds as not globally reachable is allowed until the
+tables are updated (see `data/README.md`).
 -/
 
 namespace UrlFence.Addr
@@ -54,10 +74,11 @@ def global6 : Prefix 128 := ⟨ip6 [0x2000, 0, 0, 0, 0, 0, 0, 0], 3⟩
 /-- The IPv4 address in the last 32 bits of an IPv6 address. -/
 def low32 (a : BitVec 128) : BitVec 32 := a.setWidth 32
 
-/-- An ISATAP interface identifier (RFC 5214): the 32 bits before the last 32 are `0000:5efe` or
-`0200:5efe`. -/
+/-- An ISATAP interface identifier (RFC 5214, section 6.1): the 32 bits before the last 32 are
+`0000:5efe`, except for the u and g bits (`000000ug` in the first octet), so also `0100:5efe`,
+`0200:5efe` and `0300:5efe`. -/
 def isatapId (a : BitVec 128) : Bool :=
-  (a >>> 32).setWidth 32 == 0x00005efe#32 || (a >>> 32).setWidth 32 == 0x02005efe#32
+  ((a >>> 32).setWidth 32 &&& 0xfcffffff#32) == 0x00005efe#32
 
 /-- In the block of a row of the IPv4 registry that is not globally reachable. -/
 def unreachable4 (v : BitVec 32) : Bool :=
@@ -81,7 +102,8 @@ def Config.allows4 (cfg : Config) (v : BitVec 32) : Bool :=
   !unreachable4 v && !multicast4.contains v && !cfg.deny4.any (·.contains v)
 
 /-- A NAT64 prefix is honoured if it is `64:ff9b::/96`, or a /96 inside 2000::/3 that has no address
-in common with a row that is not globally reachable. -/
+in common with a row that is not globally reachable. The addresses of a configured prefix that is
+not honoured are denied (except in `::ffff:0:0/96`, decided as IPv4-mapped). -/
 def nat64Ok (p : BitVec 128) : Bool :=
   wellKnown96.contains p ||
     (global6.contains p &&
@@ -126,10 +148,13 @@ def mappedAddr (v : BitVec 32) : BitVec 128 := BitVec.ofNat 128 (0xffff * 2 ^ 32
 def nat64Addr (p : BitVec 128) (v : BitVec 32) : BitVec 128 :=
   BitVec.ofNat 128 (p.toNat / 2 ^ 32 * 2 ^ 32 + v.toNat)
 
-/-- An ISATAP address of `v` (RFC 5214): the first 64 bits of `p`, then `0200:5efe` if `u` and
-`0000:5efe` otherwise, then `v`. -/
-def isatapAddr (p : BitVec 128) (u : Bool) (v : BitVec 32) : BitVec 128 :=
-  BitVec.ofNat 128 (p.toNat / 2 ^ 64 * 2 ^ 64 + (if u then 0x02005efe else 0x00005efe) * 2 ^ 32 + v.toNat)
+/-- The ISATAP interface identifier with the u and g bits as given. -/
+def isatapWord (u g : Bool) : Nat := (if u then 0x02000000 else 0) + (if g then 0x01000000 else 0) + 0x5efe
+
+/-- An ISATAP address of `v` (RFC 5214): the first 64 bits of `p`, then `0000:5efe` with the u and g
+bits as given, then `v`. -/
+def isatapAddr (p : BitVec 128) (u g : Bool) (v : BitVec 32) : BitVec 128 :=
+  BitVec.ofNat 128 (p.toNat / 2 ^ 64 * 2 ^ 64 + isatapWord u g * 2 ^ 32 + v.toNat)
 
 /-! ## The decision, exactly -/
 
@@ -299,28 +324,25 @@ theorem nat64Addr_spec (p : BitVec 128) (v : BitVec 32) :
     simp only [low32, nat64Addr, BitVec.toNat_setWidth, BitVec.toNat_ofNat] at hp hv ⊢
     omega
 
-theorem isatapAddr_spec (p : BitVec 128) (u : Bool) (v : BitVec 32) :
-    isatapId (isatapAddr p u v) = true ∧ low32 (isatapAddr p u v) = v := by
+theorem isatapWord_lt (u g : Bool) : isatapWord u g < 2 ^ 32 := by
+  cases u <;> cases g <;> decide
+
+theorem isatapAddr_spec (p : BitVec 128) (u g : Bool) (v : BitVec 32) :
+    isatapId (isatapAddr p u g v) = true ∧ low32 (isatapAddr p u g v) = v := by
   have hp := p.isLt
   have hv := v.isLt
+  have hw := isatapWord_lt u g
+  generalize hwd : isatapWord u g = w at hw
   constructor
-  · cases u
-    · have : (isatapAddr p false v >>> 32).setWidth 32 = 0x00005efe#32 := by
-        apply BitVec.eq_of_toNat_eq
-        simp only [isatapAddr, BitVec.toNat_setWidth, BitVec.toNat_ushiftRight,
-          Nat.shiftRight_eq_div_pow, BitVec.toNat_ofNat, Bool.false_eq_true, ↓reduceIte] at hp hv ⊢
-        omega
-      simp [isatapId, this]
-    · have : (isatapAddr p true v >>> 32).setWidth 32 = 0x02005efe#32 := by
-        apply BitVec.eq_of_toNat_eq
-        simp only [isatapAddr, BitVec.toNat_setWidth, BitVec.toNat_ushiftRight,
-          Nat.shiftRight_eq_div_pow, BitVec.toNat_ofNat, ↓reduceIte] at hp hv ⊢
-        omega
-      simp [isatapId, this]
+  · have : (isatapAddr p u g v >>> 32).setWidth 32 = BitVec.ofNat 32 (isatapWord u g) := by
+      apply BitVec.eq_of_toNat_eq
+      simp only [isatapAddr, hwd, BitVec.toNat_setWidth, BitVec.toNat_ushiftRight,
+        Nat.shiftRight_eq_div_pow, BitVec.toNat_ofNat] at hp hv hw ⊢
+      omega
+    rw [isatapId, this]
+    cases u <;> cases g <;> decide
   · apply BitVec.eq_of_toNat_eq
-    cases u <;>
-    simp only [low32, isatapAddr, BitVec.toNat_setWidth, BitVec.toNat_ofNat, Bool.false_eq_true,
-      ↓reduceIte] at hp hv ⊢ <;>
+    simp only [low32, isatapAddr, hwd, BitVec.toNat_setWidth, BitVec.toNat_ofNat] at hp hv hw ⊢
     omega
 
 /-- An IPv4-mapped address is allowed exactly when its IPv4 address is, and no denied IPv6 prefix
@@ -413,22 +435,71 @@ theorem nat64_denied (cfg : Config) (p : BitVec 128) (hp : p ∈ cfg.nat64) (v :
       rw [hemb he] at hv
       cases hv
 
-/-- An ISATAP address of a denied IPv4 address is denied, under any prefix. -/
-theorem isatap_denied (cfg : Config) (p : BitVec 128) (u : Bool) (v : BitVec 32)
-    (hv : cfg.allows (.v4 v) = false) : cfg.allows (.v6 (isatapAddr p u v)) = false := by
+/-- An ISATAP address of a denied IPv4 address is denied, under any prefix and with any u and g
+bits. -/
+theorem isatap_denied (cfg : Config) (p : BitVec 128) (u g : Bool) (v : BitVec 32)
+    (hv : cfg.allows (.v4 v) = false) : cfg.allows (.v6 (isatapAddr p u g v)) = false := by
   change cfg.allows4 v = false at hv
   show cfg.allows6 _ = false
-  obtain ⟨hi, hl⟩ := isatapAddr_spec p u v
-  cases h : cfg.allows6 (isatapAddr p u v)
+  obtain ⟨hi, hl⟩ := isatapAddr_spec p u g v
+  cases h : cfg.allows6 (isatapAddr p u g v)
   · rfl
   · exfalso
     obtain ⟨-, hemb, hgen⟩ := (allows6_iff cfg _).mp h
     rw [hl] at hemb hgen
-    cases he : cfg.embeds (isatapAddr p u v)
+    cases he : cfg.embeds (isatapAddr p u g v)
     · rw [(hgen he).2.2 hi] at hv
       cases hv
     · rw [hemb he] at hv
       cases hv
+
+/-! ## What configuring NAT64 prefixes can allow -/
+
+/-- Configuring NAT64 prefixes allows nothing beyond what the same configuration without them
+allows, except addresses in `64:ff9b::/96` whose IPv4 address is allowed. (An honoured prefix of
+the caller's own is a /96 inside 2000::/3 outside every row that is not globally reachable, so its
+addresses would be allowed anyway unless their ISATAP-looking identifier carries a denied IPv4
+address; the IPv4 decision covers that.) -/
+theorem allows_nat64_wellKnown (cfg : Config) (a : Addr) (h : cfg.allows a = true) :
+    ({ cfg with nat64 := [] } : Config).allows a = true ∨
+      ∃ x, a = .v6 x ∧ wellKnown96.contains x = true ∧ cfg.allows4 (low32 x) = true := by
+  cases a with
+  | v4 v => exact Or.inl h
+  | v6 x =>
+    obtain ⟨hd, hemb, hgen⟩ := (allows6_iff cfg x).mp h
+    have he0 : ({ cfg with nat64 := [] } : Config).embeds x = mapped96.contains x := by
+      simp [Config.embeds]
+    cases he : cfg.embeds x
+    · left
+      have hm : mapped96.contains x = false := by
+        cases hm : mapped96.contains x
+        · rfl
+        · have := (embeds_iff cfg x).mpr (Or.inl hm)
+          rw [he] at this
+          cases this
+      exact (allows6_iff { cfg with nat64 := [] } x).mpr
+        ⟨hd, fun h1 => (by rw [he0, hm] at h1; cases h1), fun _ => hgen he⟩
+    · have h4 := hemb he
+      rcases (embeds_iff cfg x).mp he with hmap | ⟨p, -, hok, hp⟩
+      · left
+        exact (allows6_iff { cfg with nat64 := [] } x).mpr
+          ⟨hd, fun _ => h4, fun h1 => (by rw [he0, hmap] at h1; cases h1)⟩
+      · rcases (nat64Ok_iff p).mp hok with hw | ⟨hgp, hno⟩
+        · right
+          refine ⟨x, rfl, ?_, h4⟩
+          rw [Prefix.contains_congr hp (q := wellKnown96) (by simp [wellKnown96])]
+          exact hw
+        · left
+          refine (allows6_iff { cfg with nat64 := [] } x).mpr
+            ⟨hd, fun _ => h4, fun _ => ⟨?_, ?_, fun _ => h4⟩⟩
+          · rw [Prefix.contains_congr hp (q := global6) (by simp [global6])]
+            exact hgp
+          · intro r hr hg
+            cases hc : r.block.contains x
+            · rfl
+            · have := Prefix.overlaps_of_contains hp hc
+              rw [hno r hr hg] at this
+              cases this
 
 /-! ## Denying more -/
 

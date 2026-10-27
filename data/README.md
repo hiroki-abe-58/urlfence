@@ -15,7 +15,21 @@ of the registries' XML files
 <https://www.iana.org/assignments/iana-ipv6-special-registry/iana-ipv6-special-registry.xml>).
 
 `UrlFence/Addr/Registry.lean` transcribes the address block, name and "Globally Reachable" value of
-every row. `python3 scripts/check_registry.py` compares the Lean tables with these files.
+every row. `python3 scripts/check_registry.py` compares the Lean tables with these files (CI and
+`scripts/reproduce.sh` run it).
+
+## Updating
+
+The tables are a snapshot. Until they are updated, a block that IANA adds as not globally
+reachable is allowed by URLFence. To update:
+
+1. Fetch both CSV files from the URLs above into this directory, and note the date, the
+   registries' "last updated" dates and the new SHA-256 here and in `scripts/check_registry.py`.
+2. Change the rows in `UrlFence/Addr/Registry.lean` until `python3 scripts/check_registry.py`
+   passes, and review each changed row's "Globally Reachable" value and footnotes.
+3. `lake build` (some proofs and examples name rows by position or by block), then
+   `./scripts/audit.sh --print-statements > scripts/statements.expected`: the pins of the
+   statements that depend on the tables change. Review that diff, then run `./scripts/audit.sh`.
 
 ## Footnotes
 

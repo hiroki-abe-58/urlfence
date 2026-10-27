@@ -31,7 +31,8 @@ PUBLISHED="join_split split_join split_append_sep join_append parseHost_render p
   Addr.allows_of_add_deny6
   Addr.Prefix.contains_iff_getMsbD Addr.parse4_isSome_iff
   Addr.render6_canonical Addr.hex16_canonical
-  Addr.explain_eq_none_iff Addr.parsePrefix_v4 Addr.parsePrefix_v6"
+  Addr.explain_eq_none_iff Addr.parsePrefix_v4 Addr.parsePrefix_v6
+  Addr.parse4_eq_some_iff Addr.allows_nat64_wellKnown"
 
 # 1. Build configuration, checked before anything runs Lake (a lakefile is code that Lake executes).
 #    Any change to these files must update the hashes here, in plain sight. Pinning them rules out

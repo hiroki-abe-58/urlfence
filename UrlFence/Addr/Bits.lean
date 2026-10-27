@@ -164,5 +164,35 @@ theorem digits_lt (b k n : Nat) (hb : 0 < b) : ∀ d ∈ digits b k n, d < b := 
     · exact ih _ d hd
     · exact Nat.mod_lt _ hb
 
+theorem ofDigits_lt (b : Nat) (ds : List Nat) (h : ∀ d ∈ ds, d < b) : ofDigits b ds < b ^ ds.length := by
+  obtain ⟨l, rfl⟩ : ∃ l, ds = l.reverse := ⟨ds.reverse, by simp⟩
+  induction l with
+  | nil => simp [ofDigits]
+  | cons d l ih =>
+    simp only [List.reverse_cons] at h ⊢
+    rw [ofDigits_snoc, List.length_append, List.length_singleton, Nat.pow_succ']
+    have hd := h d (by simp)
+    have hx := ih (fun x hx => h x (by simp [hx]))
+    calc b * ofDigits b l.reverse + d < b * ofDigits b l.reverse + b := by omega
+      _ = b * (ofDigits b l.reverse + 1) := by rw [Nat.mul_add, Nat.mul_one]
+      _ ≤ b * b ^ l.reverse.length := Nat.mul_le_mul_left _ hx
+
+/-- Reading digits back: `digits` and `ofDigits` are inverse on digits below the base. -/
+theorem digits_ofDigits (b : Nat) (ds : List Nat) (h : ∀ d ∈ ds, d < b) :
+    digits b ds.length (ofDigits b ds) = ds := by
+  obtain ⟨l, rfl⟩ : ∃ l, ds = l.reverse := ⟨ds.reverse, by simp⟩
+  induction l with
+  | nil => rfl
+  | cons d l ih =>
+    simp only [List.reverse_cons] at h ⊢
+    have hd := h d (by simp)
+    have hb : 0 < b := by omega
+    rw [ofDigits_snoc, List.length_append, List.length_singleton, digits]
+    rw [show (b * ofDigits b l.reverse + d) / b = ofDigits b l.reverse by
+          rw [Nat.add_comm, Nat.add_mul_div_left _ _ hb, Nat.div_eq_of_lt hd, Nat.zero_add],
+        show (b * ofDigits b l.reverse + d) % b = d by
+          rw [Nat.add_comm, Nat.add_mul_mod_self_left, Nat.mod_eq_of_lt hd],
+        ih (fun x hx => h x (by simp [hx]))]
+
 end Addr
 end UrlFence

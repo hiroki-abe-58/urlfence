@@ -5,7 +5,9 @@ import UrlFence.Addr.Registry
 
 * **IPv4**: four dotted-decimal parts `0` to `255` without leading zeros, as in `UrlFence.parseHost`
   (`ipv4Ok`): `parse4` accepts exactly the strings that `parseHost` reads as IPv4 addresses
-  (`parse4_isSome_iff`). `127.1`, `0x7f.0.0.1` and `017.0.0.1` are refused.
+  (`parse4_isSome_iff`). `127.1`, `0x7f.0.0.1` and `017.0.0.1` are refused. Each IPv4 address has
+  exactly one accepted form: `parse4 s = some v` exactly when `s` is `render4 v` (`parse4_eq_some_iff`).
+  For IPv6 the values are tested, not proven: `tests/test_addr.py` compares them with `inet_pton`.
 * **IPv6**: the text forms of RFC 4291, section 2.2: eight groups of 1 to 4 hex digits in either
   case, separated by `:`; at most one `::` standing for one or more zero groups; the last two
   groups may be written as a dotted quad in the IPv4 form above (`::ffff:192.0.2.1`). Zone IDs
@@ -72,6 +74,92 @@ theorem parse4_render4 (a : BitVec 32) : parse4 (render4 a) = some a := by
   have := a.isLt
   simp only [BitVec.toNat_ofNat] at this ⊢
   omega
+
+theorem isDigit_toNat (c : Char) (h : isDigit c = true) : 48 ≤ c.toNat ∧ c.toNat ≤ 57 := by
+  simp [isDigit, Char.le_def] at h
+  exact h
+
+/-- The decimal digit `n`. -/
+def digitChar (n : Nat) : Char := Char.ofNat (48 + n)
+
+theorem eq_digitChar (c : Char) (h : isDigit c = true) : ∃ i, i < 10 ∧ c = digitChar i := by
+  have := isDigit_toNat c h
+  refine ⟨c.toNat - 48, by omega, ?_⟩
+  unfold digitChar
+  rw [show 48 + (c.toNat - 48) = c.toNat by omega, Char.ofNat_toNat]
+
+theorem octet_strings1 : ∀ a, a < 10 →
+    octetOk [digitChar a] = true → Nat.toDigits 10 (decValue [digitChar a]) = [digitChar a] := by
+  decide +kernel
+
+theorem octet_strings2 : ∀ a, a < 10 → ∀ b, b < 10 →
+    octetOk [digitChar a, digitChar b] = true →
+      Nat.toDigits 10 (decValue [digitChar a, digitChar b]) = [digitChar a, digitChar b] := by
+  decide +kernel
+
+theorem octet_strings3 : ∀ a, a < 10 → ∀ b, b < 10 → ∀ c, c < 10 →
+    octetOk [digitChar a, digitChar b, digitChar c] = true →
+      Nat.toDigits 10 (decValue [digitChar a, digitChar b, digitChar c]) =
+        [digitChar a, digitChar b, digitChar c] := by
+  decide +kernel
+
+/-- A part in the strict form is the decimal form of its value. -/
+theorem toDigits_decValue (p : List Char) (h : octetOk p = true) : Nat.toDigits 10 (decValue p) = p := by
+  have hd := octetOk_digits p h
+  have hlen : 0 < p.length ∧ p.length ≤ 3 := by
+    simp only [octetOk, Bool.and_eq_true, decide_eq_true_eq] at h
+    exact ⟨h.1.1.1.1, h.1.1.1.2⟩
+  match p, hlen, hd, h with
+  | [x], _, hd, h =>
+    obtain ⟨i, hi, rfl⟩ := eq_digitChar x (hd x (by simp))
+    exact octet_strings1 i hi h
+  | [x, y], _, hd, h =>
+    obtain ⟨i, hi, rfl⟩ := eq_digitChar x (hd x (by simp))
+    obtain ⟨j, hj, rfl⟩ := eq_digitChar y (hd y (by simp))
+    exact octet_strings2 i hi j hj h
+  | [x, y, z], _, hd, h =>
+    obtain ⟨i, hi, rfl⟩ := eq_digitChar x (hd x (by simp))
+    obtain ⟨j, hj, rfl⟩ := eq_digitChar y (hd y (by simp))
+    obtain ⟨k, hk, rfl⟩ := eq_digitChar z (hd z (by simp))
+    exact octet_strings3 i hi j hj k hk h
+  | [], hlen, _, _ => simp at hlen
+  | _ :: _ :: _ :: _ :: _, hlen, _, _ => simp at hlen
+
+theorem octetOk_value (l : List Char) (h : octetOk l = true) : decValue l ≤ 255 := by
+  simp only [octetOk, Bool.and_eq_true, decide_eq_true_eq] at h
+  exact h.2
+
+/-- `parse4` reads a string as `v` exactly when it is the dotted-decimal form of `v`: every IPv4
+address has exactly one accepted text form. -/
+theorem parse4_eq_some_iff (s : List Char) (v : BitVec 32) : parse4 s = some v ↔ render4 v = s := by
+  constructor
+  · intro h
+    unfold parse4 at h
+    split at h
+    · rename_i hv
+      injection h with h
+      subst h
+      simp only [ipv4Ok, Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at hv
+      obtain ⟨hlen4, hall⟩ := hv
+      have hlt : ∀ d ∈ (split '.' s).map decValue, d < 256 := by
+        intro d hd
+        obtain ⟨p, hp, rfl⟩ := List.mem_map.mp hd
+        have := octetOk_value p (hall p hp)
+        omega
+      have hval : (BitVec.ofNat 32 (ofDigits 256 ((split '.' s).map decValue))).toNat =
+          ofDigits 256 ((split '.' s).map decValue) := by
+        have := ofDigits_lt 256 _ hlt
+        rw [List.length_map, hlen4] at this
+        rw [BitVec.toNat_ofNat]
+        exact Nat.mod_eq_of_lt (by simpa using this)
+      unfold render4
+      rw [hval, show 4 = ((split '.' s).map decValue).length by simp [hlen4], digits_ofDigits 256 _ hlt,
+        List.map_map, List.map_congr_left (f := Nat.toDigits 10 ∘ decValue) (g := id)
+          (fun p hp => toDigits_decValue p (hall p hp)), List.map_id, join_split]
+    · cases h
+  · intro h
+    rw [← h]
+    exact parse4_render4 v
 
 /-- `parse4` accepts exactly the strings that `parseHost`, the host parser of URLs, reads as IPv4
 addresses. -/
