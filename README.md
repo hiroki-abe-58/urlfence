@@ -131,14 +131,41 @@ and JSON output are ordinary code, covered by tests.
 * `tests/test_cases.py` runs fixed cases in the style of the advisories, and checks the CLI's
   contract.
 * `tests/test_whatwg.py` compares URLFence with Node's WHATWG `URL` on about 10,000 random and
-  adversarial URLs, including every printable ASCII character inserted into hosts. For every URL
-  URLFence accepts, WHATWG must read:
+  adversarial URLs, including printable ASCII characters inserted into hosts at random positions.
+  For every URL URLFence accepts, WHATWG must read:
   * the same scheme, host and port (`:443` and `:80` count as the default);
   * no userinfo;
   * a host for which the matching rules give the same decision.
 
   URLFence may refuse what WHATWG accepts, and on these inputs it refuses about 6,000 such URLs.
   Skipped if `node` is not installed.
+* `tests/compat.py` checks that common HTTP clients read every accepted URL as URLFence does, on a
+  deterministic corpus of 41,647 URLs, 17,044 of them accepted (its size and SHA-256 are pinned in
+  the script). There are two views, reported separately:
+  * parser: Node's WHATWG `URL`, Python's `urllib.parse.urlsplit` and `urllib.request.Request`,
+    `urllib3.util.parse_url`, `requests` (its URL preparation, then urllib3) and curl
+    (`--write-out '%{url.*}'`), with no network;
+  * request: what `urllib.request`, `urllib3`, `requests` and curl actually ask for, seen by an HTTP
+    proxy fixture on 127.0.0.1 that answers 403. For http that is the absolute URL, the `Host`
+    header and any `Authorization` header; for https it is only `CONNECT host:port`, so userinfo,
+    the TLS server name and the inner `Host` header are not seen. curl is always given the
+    fixture as its proxy, and while the Python clients run, any address lookup other than for the
+    fixture's address and port is refused and fails the run, so nothing leaves the machine. This
+    is the proxy path only: a client's direct path is not observed, and there is no Node request
+    view (Node's standard library, 18.19.1 here, has no proxy-aware client).
+
+  A disagreement fails the run. A client that is not installed is reported as skipped, never as
+  agreeing. A client that refuses an accepted URL is listed separately; `--strict` fails on it, and
+  so does any view that refuses more than 1% of the URLs. `--self-test` checks that every view
+  reports a difference for each of 6 deliberately wrong expectations (host and port over http and
+  https, userinfo over http).
+  With Python 3.12.3, urllib3 2.0.7, requests 2.31.0, curl 8.5.0 and Node 18.19.1, the full corpus
+  gives no disagreement and one refusal: urllib3, and requests through it, parse a path that starts
+  with `//` again as an authority, and refuse `https://b//yc%80a:;` without sending anything.
+  CI runs the self-test and a fixed 1/16 subset with `--strict`, and requires `whatwg`, `urlsplit`,
+  `urllib.request` and curl; urllib3 and requests run there only if the runner has them. Run
+  `python3 tests/compat.py` for the full corpus. These are tests on this corpus and these client
+  versions, not proofs.
 * `tests/mutants.py` plants 15 plausible bugs, one at a time, and requires each one to be caught.
   They include the CVE-style prefix and suffix mistakes, a wrong authority boundary, and accepting
   octal IPv4 parts. So far every one fails the build, and the script names the file: a theorem or a
