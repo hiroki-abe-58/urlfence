@@ -158,16 +158,21 @@ and JSON output are ordinary code, covered by tests.
     Agent's `createConnection` ([`tests/compat_direct.js`](tests/compat_direct.js)), for the Python
     clients by answering the one address lookup inside `socket.create_connection` or urllib3's
     `create_connection` with the fixture's address, and for curl by `--connect-to` rules that send
-    it to one of four fixture ports depending on whether its own host and port are URLFence's. The
-    client must connect to URLFence's host and port. For http it must send an origin-form request
+    it to one of four fixture ports depending on whether its own host and port are URLFence's (curl
+    matches these rules ignoring ASCII case). The client must connect to URLFence's host and port. For http it must send an origin-form request
     whose `Host` header names them, without an `Authorization` header. For https it must send the
     host as the TLS server name (SNI, read from the ClientHello; for an IPv4 host, none or the
-    address), and a Python client must be checking the certificate against the host (its
-    `server_hostname`, when it gives one). The fixture then answers 403 or a fatal TLS alert, so
-    the handshake never completes: what an allowed name resolves to (nothing is resolved), the
-    certificate check and everything inside TLS (the inner request and its `Host` header) are not
-    observed. Node refuses and reports any lookup or connection other than to the fixture, and the
-    Python clients keep the lookup guard above; curl only ever has 127.0.0.1 to connect to.
+    address), and a Python client must give the host as `server_hostname` (the name it would
+    verify the certificate against), when it gives one. The fixture then answers 403 or a fatal TLS
+    alert, so the handshake never completes: what an allowed name resolves to (nothing is resolved,
+    and how the system resolver reads a name is not tested either: glibc accepts `127.1`, `0x7f.1`
+    and octal parts, which URLFence's host rules refuse), whether the certificate is actually
+    verified, and everything inside TLS (the inner request and its `Host` header) are not observed.
+    Node refuses and reports any lookup or connection other than to the fixture, and the Python
+    clients keep the lookup guard above; curl only ever has 127.0.0.1 to connect to. One client
+    behaviour seen on the way: urllib3 2.0.7 drops URL userinfo on its direct path but forwards it
+    in the request line to an HTTP proxy, so credentials in a URL reach the proxy (URLFence refuses
+    userinfo, so accepted URLs carry none).
 
   A disagreement fails the run. A client that is not installed is reported as skipped, never as
   agreeing. A client that refuses an accepted URL is listed separately; `--strict` fails on it, and

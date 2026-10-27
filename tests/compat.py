@@ -37,10 +37,11 @@ three kinds of observation, reported separately:
     certificate itself after the handshake, which never completes here).
   * curl: four `--connect-to` rules, tried in order, send the connection to one of four fixture
     ports depending on whether curl's own connection host and port (what it would resolve and
-    connect to) equal URLFence's host and port. So a difference names which of the two differs,
+    connect to) equal URLFence's host and port (curl compares hosts ignoring ASCII case). So a difference names which of the two differs,
     not curl's value; the `Host` header and the server name show curl's host as sent.
-  Not observed: DNS (nothing is resolved, so what an allowed name resolves to is out of scope),
-  the certificate check, and everything inside TLS (the inner request, its `Host` header and any
+  Not observed: DNS (nothing is resolved, so what an allowed name resolves to, and how the system
+  resolver would read the name, are out of scope), whether the certificate is verified, and
+  everything inside TLS (the inner request, its `Host` header and any
   credentials), since the handshake never completes; and anything after the first message.
   To keep the run short, urllib3 and requests are given the system CA directory instead of a CA
   bundle file, and curl `--insecure`: either way only the loading of CA certificates before each
