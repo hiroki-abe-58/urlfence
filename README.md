@@ -109,14 +109,25 @@ and JSON output are ordinary code, covered by tests.
 ## How it is checked
 
 * `lake build` checks the proofs and runs the `#guard` examples.
-* `scripts/audit.sh` checks:
-  * that the library source has no `sorry`, `native_decide`, axioms, `implemented_by`/`extern`,
-    `#eval`, kernel-skipping options or metaprogramming commands;
-  * that `lakefile.lean` builds only the library and the CLI;
-  * that the library imports only `Init` and its own modules;
-  * that no compiled code is replaced;
-  * that every declaration depends on no axiom beyond the standard three;
-  * that `leanchecker` replays every module.
+* `scripts/audit.sh`:
+  * before running Lake, checks `lakefile.lean`, `lean-toolchain` and `lake-manifest.json` against
+    pinned SHA-256 hashes (a lakefile is code Lake runs), so any build-configuration change must
+    change the audit too, visibly;
+  * rejects `sorry`, `native_decide`, axioms, `implemented_by`/`extern`, `partial`/`unsafe`, `#eval`,
+    `#exit`, kernel-skipping options and metaprogramming commands in the library source;
+  * checks the compiled environment:
+    * the library imports only `Init` and its own modules;
+    * no compiled code is replaced;
+    * every declaration depends on no axiom beyond the standard three;
+    * the published theorems are pinned in
+      [`scripts/statements.expected`](scripts/statements.expected), both as printed text and as a
+      SHA-256 hash of the raw terms of every UrlFence definition they depend on (constructors
+      included). A renamed theorem, a weakened statement or a changed definition behind it fails;
+  * replays every module through `leanchecker`.
+
+  CI checks the pins before anything builds. The audit does not protect its own inputs (this
+  script, `scripts/Axioms.lean`, `scripts/statements.expected`, the CI workflow): a change to them
+  shows in the diff, but whoever can change them can change the audit.
 * `tests/test_cases.py` runs fixed cases in the style of the advisories, and checks the CLI's
   contract.
 * `tests/test_whatwg.py` compares URLFence with Node's WHATWG `URL` on about 10,000 random and

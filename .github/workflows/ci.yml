@@ -13,8 +13,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Before anything runs Lake (a lakefile is code): the build configuration must match its pins.
+      - name: Pinned build configuration
+        run: ./scripts/audit.sh --pins
       - uses: leanprover/lean-action@24581d74d674803a25a81b10b059c5c0cdd344c6 # v1.6.2
-      - name: Proof audit (forbidden keywords, imports, axioms of every declaration, leanchecker)
+      - name: Proof audit (pins, forbidden keywords, imports, axioms, published statements and their definitions, leanchecker)
         run: ./scripts/audit.sh
       - name: CLI tests (fixed cases; WHATWG differential with the runner's node)
         run: python3 -m unittest discover -s tests -v

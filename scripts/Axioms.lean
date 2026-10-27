@@ -9,9 +9,56 @@ import Lean
   modules may be imported, so no other code can reach the library.
 * `IMPLBY <name> <impl>` and `EXTERN <name>` for every UrlFence declaration whose compiled code is
   replaced (`implemented_by`, `extern`). There must be none: the binary must run the code the
-  theorems are about. -/
+  theorems are about.
+* `STATEMENT <name> : <type>` for every theorem, pretty-printed on one line, so that the published
+  statements can be compared with `scripts/statements.expected`.
+* `DEPS <name> <dep> …` for every theorem: every UrlFence constant its statement depends on,
+  directly or indirectly (through types and definition bodies, not proofs; an inductive type brings
+  its constructors and recursor), and `CANON <name> <text>` for every UrlFence constant: its type,
+  value and constructors as raw terms (implicit arguments and instances included). `audit.sh`
+  hashes a statement's `CANON` lines with SHA-256, so a change to `domainOk`, `parse`, a
+  constructor list or anything else a statement refers to changes the pin, even when the printed
+  statement stays the same. -/
 
 open Lean Elab Command
+
+/-- The UrlFence constants reachable from `todo` through types and definition bodies (theorem
+proofs are not followed). -/
+partial def depClosure (env : Environment) (isOurs : Name → Bool) (todo : List Name) (seen : NameSet) : NameSet :=
+  match todo with
+  | [] => seen
+  | n :: rest =>
+    if seen.contains n then depClosure env isOurs rest seen else
+    let ours := (env.getModuleIdxFor? n).bind (fun i => env.header.moduleNames[i.toNat]?) |>.map isOurs
+    if ours != some true then depClosure env isOurs rest seen else
+    match env.find? n with
+    | none => depClosure env isOurs rest seen
+    | some ci =>
+      let body := match ci with
+        | .thmInfo _ => []
+        | _ => (ci.value?.map Expr.getUsedConstants).getD #[] |>.toList
+      let family := match ci with
+        | .inductInfo v => v.ctors ++ [mkRecName n]
+        | .ctorInfo v => [v.induct]
+        | _ => []
+      depClosure env isOurs (ci.type.getUsedConstants.toList ++ body ++ family ++ rest) (seen.insert n)
+
+/-- The UrlFence constants a theorem's statement depends on, sorted. -/
+def statementDeps (env : Environment) (isOurs : Name → Bool) (ci : ConstantInfo) : Array Name :=
+  (depClosure env isOurs ci.type.getUsedConstants.toList {}).toList.toArray.qsort
+    (fun a b => a.toString < b.toString)
+
+/-- A constant as one line of raw terms: type, value (not for theorems) and, for an inductive type,
+its constructors, parameters and indices. -/
+def canon (ci : ConstantInfo) : String :=
+  let value := match ci with
+    | .thmInfo _ => ""
+    | _ => (ci.value?.map toString).getD ""
+  let family := match ci with
+    | .inductInfo v => s!" ctors={v.ctors} params={v.numParams} indices={v.numIndices}"
+    | .ctorInfo v => s!" induct={v.induct} cidx={v.cidx} fields={v.numFields}"
+    | _ => ""
+  s!"{ci.type} := {value}{family}".replace "\n" " "
 
 run_cmd do
   let env ← getEnv
@@ -31,8 +78,15 @@ run_cmd do
       | .axiomInfo _ => "axiom"
       | .opaqueInfo _ => "opaque"
       | _ => "def"
+    lines := lines.push s!"CANON {name} {canon ci}"
     let axs ← collectAxioms name
     lines := lines.push s!"AXIOMS {kind} {name}: {axs.toList}"
+    if kind == "theorem" then
+      let fmt ← liftTermElabM (Meta.ppExpr ci.type)
+      let raw := (fmt.pretty 100000).replace "\n" " "
+      let stmt := " ".intercalate ((raw.splitOn " ").filter (· ≠ ""))
+      lines := lines.push s!"STATEMENT {name} : {stmt}"
+      lines := lines.push s!"DEPS {name} {" ".intercalate ((statementDeps env isOurs ci).toList.map toString)}"
     if let some impl := Compiler.getImplementedBy? env name then
       lines := lines.push s!"IMPLBY {name} {impl}"
     if isExtern env name then

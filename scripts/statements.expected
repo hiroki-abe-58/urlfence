@@ -1,0 +1,44 @@
+STATEMENT UrlFence.join_split : ∀ (sep : Char) (l : List Char), UrlFence.join sep (UrlFence.split sep l) = l
+DEPSHA UrlFence.join_split d10316daaed015c338bc47721a7e5eb0524ea2a597f4781dc6a7e777bf462528
+STATEMENT UrlFence.split_join : ∀ (sep : Char) (ps : List (List Char)), ps ≠ [] → (∀ (p : List Char), p ∈ ps → ¬sep ∈ p) → UrlFence.split sep (UrlFence.join sep ps) = ps
+DEPSHA UrlFence.split_join 2b94855be8178f655453da01e097b8e4f255bdcb10fc22f8e8fb97e59aa4ca3b
+STATEMENT UrlFence.split_append_sep : ∀ (sep : Char) (x y : List Char), UrlFence.split sep (x ++ sep :: y) = UrlFence.split sep x ++ UrlFence.split sep y
+DEPSHA UrlFence.split_append_sep a572086645536c2015278845373c127e9b98a546ed409902fd6d79a41e7bb888
+STATEMENT UrlFence.join_append : ∀ (sep : Char) (x y : List (List Char)), x ≠ [] → y ≠ [] → UrlFence.join sep (x ++ y) = UrlFence.join sep x ++ sep :: UrlFence.join sep y
+DEPSHA UrlFence.join_append 8c2bacd7c2fb1462632c7e27c63428cf209349b158519ccc5913129be3d37056
+STATEMENT UrlFence.parseHost_render : ∀ (s : List Char) (h : UrlFence.Host), UrlFence.parseHost s = some h → h.render = s
+DEPSHA UrlFence.parseHost_render 26dc8067880ddaa051738bc508924ea7be644f7987a8145a720388e16f6b850d
+STATEMENT UrlFence.parseHost_valid : ∀ (s : List Char) (h : UrlFence.Host), UrlFence.parseHost s = some h → h.Valid
+DEPSHA UrlFence.parseHost_valid 1b89217482e23b496cb3d559ae6ee3b2ee30a5a2196de222b2c3716c47bc60d6
+STATEMENT UrlFence.parseHost_chars : ∀ (s : List Char) (h : UrlFence.Host), UrlFence.parseHost s = some h → ∀ (c : Char), c ∈ h.render → 'a' ≤ c ∧ c ≤ 'z' ∨ '0' ≤ c ∧ c ≤ '9' ∨ c = '-' ∨ c = '.'
+DEPSHA UrlFence.parseHost_chars 0797a67c8b069fc92769251c3fdd714e0cfe08016a0198c0ac8911aaa097087b
+STATEMENT UrlFence.domainOk_noDot : ∀ (ls : List (List Char)), UrlFence.domainOk ls = true → ∀ (l : List Char), l ∈ ls → ¬'.' ∈ l
+DEPSHA UrlFence.domainOk_noDot 6ac1ab4fe14b6be1e40c0b13ee28d6e3c1df3e1bbffa1426ba7188f102056634
+STATEMENT UrlFence.parseScheme_spec : ∀ (s r : List Char) (sc : UrlFence.Scheme), UrlFence.parseScheme s = some (sc, r) → s = sc.pre ++ r
+DEPSHA UrlFence.parseScheme_spec 0d13699b92b21ebaef11f9a0ecf9f293640b01065a4e3192779a05c384829c6b
+STATEMENT UrlFence.splitPort_spec : ∀ (a h : List Char) (p : Option (List Char)), UrlFence.splitPort a = some (h, p) → a = h ++ UrlFence.portPart p
+DEPSHA UrlFence.splitPort_spec 744efa48430fc5715d6255107b771e9fdb48073e67cdfd1e10d0bc1cd3900768
+STATEMENT UrlFence.parse_render : ∀ (s : List Char) (u : UrlFence.Url), UrlFence.parse s = Except.ok u → u.render = s
+DEPSHA UrlFence.parse_render 5bd4cc54b6c9492f99f57be52680ad8d43479dc32932d46df2b05e3b92d41c1d
+STATEMENT UrlFence.parse_valid : ∀ (s : List Char) (u : UrlFence.Url), UrlFence.parse s = Except.ok u → u.host.Valid
+DEPSHA UrlFence.parse_valid f8d97b9d2ccd3dff09de1002d5f7b62c347cd7af0c88198d54c5f512708a36b9
+STATEMENT UrlFence.parse_no_userinfo : ∀ (s : List Char) (u : UrlFence.Url), UrlFence.parse s = Except.ok u → ¬'@' ∈ List.takeWhile (fun c => !UrlFence.isDelim c) (List.drop u.scheme.pre.length s)
+DEPSHA UrlFence.parse_no_userinfo d521ca89595d831e26557e4637c1be9d36806425da8a466317db01858027d574
+STATEMENT UrlFence.parse_authority : ∀ (s : List Char) (u : UrlFence.Url), UrlFence.parse s = Except.ok u → List.takeWhile (fun c => !UrlFence.isDelim c) (List.drop u.scheme.pre.length s) = u.host.render ++ UrlFence.portPart u.port ∧ (u.rest = [] ∨ ∃ c t, u.rest = c :: t ∧ (c = '/' ∨ c = '?' ∨ c = '#'))
+DEPSHA UrlFence.parse_authority 21bbd6dfb7e66b844d66a49f2fc21c8ba7c36c92990c2a261c9c1ab10c24dd70
+STATEMENT UrlFence.isDelim_iff : ∀ (c : Char), UrlFence.isDelim c = true ↔ c = '/' ∨ c = '?' ∨ c = '#'
+DEPSHA UrlFence.isDelim_iff 33b3e5f1e9f2ef7e01c240fd20ee81860d94cc97cf2e507661976760fdb9fb44
+STATEMENT UrlFence.sub_not_ipv4 : ∀ (d ps : List (List Char)), (UrlFence.Pattern.sub d).matches (UrlFence.Host.ipv4 ps) = false
+DEPSHA UrlFence.sub_not_ipv4 b79a25a5ee30c9130c18db190162e52640671cc45fcfc10d3228da782453eb63
+STATEMENT UrlFence.exact_matches_iff : ∀ (h' h : UrlFence.Host), (UrlFence.Pattern.exact h').matches h = true ↔ h' = h
+DEPSHA UrlFence.exact_matches_iff 7518c10df0f1e6b0176d0731f40ec64dd2bb3f237c07749d130d7c8dd7af2838
+STATEMENT UrlFence.sub_matches_iff : ∀ (d ls : List (List Char)), (UrlFence.Pattern.sub d).matches (UrlFence.Host.domain ls) = true ↔ d ≠ [] ∧ ∃ pre, pre ≠ [] ∧ ls = pre ++ d
+DEPSHA UrlFence.sub_matches_iff 968751c7fe3d144c21b9254eece51888cd7aa13b9747525fbbf0f7e2b25acb13
+STATEMENT UrlFence.sub_matches_iff_render : ∀ (d ls : List (List Char)), UrlFence.domainOk d = true → UrlFence.domainOk ls = true → ((UrlFence.Pattern.sub d).matches (UrlFence.Host.domain ls) = true ↔ '.' :: UrlFence.join '.' d <:+ UrlFence.join '.' ls)
+DEPSHA UrlFence.sub_matches_iff_render 21f6f6ce6e98fd260e8459b2cc0733613c5a14acb2d08834c94705774d032762
+STATEMENT UrlFence.check_allow_iff : ∀ (pol : UrlFence.Policy) (s : List Char) (u : UrlFence.Url), pol.check s = UrlFence.Decision.allow u ↔ UrlFence.parse s = Except.ok u ∧ u.scheme ∈ pol.schemes ∧ (∃ p, p ∈ pol.allow ∧ p.matches u.host = true) ∧ ∀ (p : UrlFence.Pattern), p ∈ pol.deny → p.matches u.host = false
+DEPSHA UrlFence.check_allow_iff 3072938370763b65d921e16afcaaac48cd4e4b65c57b4397fb00a018268a7544
+STATEMENT UrlFence.check_allow_of_add_deny : ∀ (pol : UrlFence.Policy) (q : UrlFence.Pattern) (s : List Char) (u : UrlFence.Url), { schemes := pol.schemes, allow := pol.allow, deny := q :: pol.deny }.check s = UrlFence.Decision.allow u → pol.check s = UrlFence.Decision.allow u
+DEPSHA UrlFence.check_allow_of_add_deny 7f06cfcb767167ab1a8a0eb1e0ead84801f3fb210c5d9a80458bad737ab11750
+STATEMENT UrlFence.parsePattern_sub_valid : ∀ (s : String) (d : List (List Char)), UrlFence.parsePattern s = some (UrlFence.Pattern.sub d) → UrlFence.domainOk d = true
+DEPSHA UrlFence.parsePattern_sub_valid 94b3574a3ca0b00fbe714c6d51d844e280db1a4aadd8149792473135fa2fb7ec
