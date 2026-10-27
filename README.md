@@ -166,6 +166,10 @@ and JSON output are ordinary code, covered by tests.
   `urllib.request` and curl; urllib3 and requests run there only if the runner has them. Run
   `python3 tests/compat.py` for the full corpus. These are tests on this corpus and these client
   versions, not proofs.
+* `tests/test_guarded_fetch.py` runs the example against the real binary and an HTTP proxy on
+  127.0.0.1 that stands in for the web: a redirect to another host, or to a URL with userinfo, is
+  refused before it is requested. Unusable answers from the binary, simulated by replacing
+  `subprocess.run`, refuse.
 * `tests/mutants.py` plants 15 plausible bugs, one at a time, and requires each one to be caught.
   They include the CVE-style prefix and suffix mistakes, a wrong authority boundary, and accepting
   octal IPv4 parts. So far every one fails the build, and the script names the file: a theorem or a
@@ -195,6 +199,16 @@ urlfence check --allow PATTERN ... [--deny PATTERN ...] [--scheme http|https ...
   error, including an invalid pattern or no URLs.
 * **Send the request to exactly the URL you checked.** If you rebuild it, rebuild it from `scheme`,
   `host` and `port`, never from your own parse of the input.
+* **Check every redirect.** A client that follows `Location` by itself sends the next request
+  unchecked.
+
+[`examples/guarded_fetch.py`](examples/guarded_fetch.py) is an example of all of this in Python, to
+adapt, not a hardened client: `guarded_fetch(url, allow=[...])` checks the URL, refuses unless
+URLFence's answer is one JSON object for exactly that URL with a matching exit status, requests
+(GET) exactly the checked string, and checks each redirect target before following it. It returns
+`(status, body, hops)` for the last response, whatever its status, or raises `Refused` (refused,
+or the request failed). It does nothing about DNS, the port or the path, or what a proxy or the
+server does with the URL (see below).
 
 From Lean, build a policy with `UrlFence.Policy.make` and call `Policy.checkString`.
 
