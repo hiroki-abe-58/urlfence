@@ -36,6 +36,8 @@ step "build"
 lake build
 step "proof audit"
 ./scripts/audit.sh
+step "registry tables against the IANA files"
+python3 scripts/check_registry.py
 step "tests"
 python3 -m unittest discover -s tests
 step "client comparison: self-test, then the full corpus"

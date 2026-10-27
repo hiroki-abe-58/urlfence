@@ -19,6 +19,8 @@ jobs:
       - uses: leanprover/lean-action@24581d74d674803a25a81b10b059c5c0cdd344c6 # v1.6.2
       - name: Proof audit (pins, forbidden keywords, imports, axioms, published statements and their definitions, leanchecker)
         run: ./scripts/audit.sh
+      - name: Registry tables equal the IANA files in data/
+        run: python3 scripts/check_registry.py
       - name: CLI tests (fixed cases; WHATWG differential with the runner's node)
         run: python3 -m unittest discover -s tests -v
       - name: Client compatibility (self-test, then a fixed subset; parsers, requests through a local proxy fixture, direct connections to a local fixture)
