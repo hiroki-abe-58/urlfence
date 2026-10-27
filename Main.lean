@@ -22,6 +22,23 @@ Each URL is checked with the proven `UrlFence.Policy.check`, and one JSON object
   (`input_hex`). Any other character outside printable ASCII is rejected with reason `chars`.
 * The output is ASCII: other characters are written as `\u` escapes.
 
+    urlfence addr [--nat64 PREFIX/96 …] [--deny PREFIX …] [--stdin] [-- ADDRESS …]
+
+Each resolved address is checked with the proven `UrlFence.Addr.Config.check`, and one JSON object
+is printed per address, with the address family, the address as printed by RFC 5952 (or dotted
+decimal), and for a denial the first rule that denies it (`UrlFence.Addr.Config.explain`):
+
+    {"input":"8.8.8.8","decision":"allow","family":"ipv4","addr":"8.8.8.8"}
+    {"input":"::ffff:127.0.0.1","decision":"deny","family":"ipv6","addr":"::ffff:7f00:1","reason":"mapped 127.0.0.1: registry 127.0.0.0/8 Loopback"}
+    {"input":"fe80::1%eth0","decision":"reject","reason":"parse"}
+
+* A prefix is `ADDRESS/LENGTH` in the strict form (`UrlFence.Addr.parsePrefix`): a length of at
+  most 32 or 128 without leading zeros, and no bit set after it. `--deny` takes IPv4 and IPv6
+  prefixes. `--nat64` takes a /96 that URLFence honours as a NAT64 prefix (`64:ff9b::/96`, or a /96
+  inside 2000::/3 outside every registry block that is not globally reachable); any other is a
+  usage error rather than a prefix that would be silently ignored.
+* Addresses, stdin, the exit status and the ASCII output are as for `check`.
+
 This file only parses arguments and prints results; the decisions come from the library.
 -/
 
@@ -82,8 +99,64 @@ def decisionJson (input : String) : Decision → String
   | .deny u => s!"\{\"input\":{jsonString input},\"decision\":\"deny\",{urlFields u}}"
   | .reject r => s!"\{\"input\":{jsonString input},\"decision\":\"reject\",\"reason\":\"{reasonName r}\"}"
 
-def usage : String :=
+def usageCheck : String :=
   "usage: urlfence check --allow PATTERN ... [--deny PATTERN ...] [--scheme http|https ...] [--stdin] [-- URL ...]"
+
+def usageAddr : String :=
+  "usage: urlfence addr [--nat64 PREFIX/96 ...] [--deny PREFIX ...] [--stdin] [-- ADDRESS ...]"
+
+def usage : String := usageCheck ++ "\n" ++ usageAddr
+
+structure AddrArgs where
+  nat64 : Array String := #[]
+  deny : Array String := #[]
+  stdin : Bool := false
+  addrs : Array String := #[]
+
+def parseAddrArgs : List String → AddrArgs → Except String AddrArgs
+  | [], a => .ok a
+  | "--" :: rest, a => .ok { a with addrs := a.addrs ++ rest.toArray }
+  | "--nat64" :: p :: rest, a => parseAddrArgs rest { a with nat64 := a.nat64.push p }
+  | "--deny" :: p :: rest, a => parseAddrArgs rest { a with deny := a.deny.push p }
+  | "--stdin" :: rest, a => parseAddrArgs rest { a with stdin := true }
+  | opt :: _, _ =>
+    if opt.startsWith "--" then .error s!"unknown or incomplete option: {opt}"
+    else .error s!"addresses go after `--`: {opt}"
+
+/-- The configuration from the options, or why they are not usable. -/
+def addrConfig (a : AddrArgs) : Except String Addr.Config := do
+  let mut deny4 : Array (Addr.Prefix 32) := #[]
+  let mut deny6 : Array (Addr.Prefix 128) := #[]
+  for d in a.deny do
+    match Addr.parsePrefixString d with
+    | some (.v4 p) => deny4 := deny4.push p
+    | some (.v6 p) => deny6 := deny6.push p
+    | none => throw s!"--deny {d}: not ADDRESS/LENGTH in the strict form, with no bits set after the length"
+  let mut nat64 : Array (BitVec 128) := #[]
+  for n in a.nat64 do
+    match Addr.parsePrefixString n with
+    | some (.v6 p) =>
+      if p.len != 96 then throw s!"--nat64 {n}: a NAT64 prefix must be a /96"
+      if !Addr.nat64Ok p.base then
+        throw (s!"--nat64 {n}: this prefix would be ignored; only 64:ff9b::/96, or a /96 inside 2000::/3 " ++
+          "that meets no registry block that is not globally reachable, is used as a NAT64 prefix")
+      nat64 := nat64.push p.base
+    | _ => throw s!"--nat64 {n}: not an IPv6 ADDRESS/96 in the strict form, with no bits set after the length"
+  pure { deny4 := deny4.toList, deny6 := deny6.toList, nat64 := nat64.toList }
+
+def addrFields (a : Addr) : String :=
+  let family := match a with
+    | .v4 _ => "ipv4"
+    | .v6 _ => "ipv6"
+  s!"\"family\":\"{family}\",\"addr\":{jsonString a.toString}"
+
+def verdictJson (cfg : Addr.Config) (input : String) : Addr.Verdict → String
+  | .allow a => s!"\{\"input\":{jsonString input},\"decision\":\"allow\",{addrFields a}}"
+  | .deny a =>
+    -- `explain` is `none` exactly when the address is allowed (`explain_eq_none_iff`).
+    let why := ((cfg.explain a).map Addr.Why.text).getD "denied"
+    s!"\{\"input\":{jsonString input},\"decision\":\"deny\",{addrFields a},\"reason\":{jsonString why}}"
+  | .reject => s!"\{\"input\":{jsonString input},\"decision\":\"reject\",\"reason\":\"parse\"}"
 
 /-- A requested URL: decoded exactly, or a stdin line that is not UTF-8. -/
 inductive Input where
@@ -113,13 +186,33 @@ def checkInput (pol : Policy) : Input → String × Bool
   | .text s => let d := pol.checkString s; (decisionJson s d, d matches .allow _)
   | .invalid b => (s!"\{\"input_hex\":\"{hexBytes b}\",\"decision\":\"reject\",\"reason\":\"encoding\"}", false)
 
+def checkAddrInput (cfg : Addr.Config) : Input → String × Bool
+  | .text s => let v := cfg.checkString s; (verdictJson cfg s v, v matches .allow _)
+  | .invalid b => (s!"\{\"input_hex\":\"{hexBytes b}\",\"decision\":\"reject\",\"reason\":\"encoding\"}", false)
+
 def run (argv : List String) : IO UInt32 := do
   match argv with
+  | "addr" :: rest =>
+    match parseAddrArgs rest {} with
+    | .error e => IO.eprintln e; IO.eprintln usageAddr; return 2
+    | .ok a =>
+    match addrConfig a with
+    | .error e => IO.eprintln e; return 2
+    | .ok cfg =>
+      let fromStdin ← if a.stdin then pure (stdinInputs (← readAll (← IO.getStdin) .empty)) else pure #[]
+      let inputs := a.addrs.map .text ++ fromStdin
+      if inputs.isEmpty then IO.eprintln "no addresses to check"; return 2
+      let mut ok := true
+      for i in inputs do
+        let (line, allowed) := checkAddrInput cfg i
+        if !allowed then ok := false
+        IO.println line
+      return if ok then 0 else 1
   | "check" :: rest =>
     match parseArgs rest {} with
-    | .error e => IO.eprintln e; IO.eprintln usage; return 2
+    | .error e => IO.eprintln e; IO.eprintln usageCheck; return 2
     | .ok a =>
-      if a.allow.isEmpty then IO.eprintln "at least one --allow pattern is required"; IO.eprintln usage; return 2
+      if a.allow.isEmpty then IO.eprintln "at least one --allow pattern is required"; IO.eprintln usageCheck; return 2
       let schemes := if a.schemes.isEmpty then ["https"] else a.schemes.toList
       match Policy.make schemes a.allow.toList a.deny.toList with
       | none =>
