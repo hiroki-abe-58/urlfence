@@ -1,0 +1,2 @@
+# The IANA registry files are kept byte for byte as served (CRLF line endings).
+data/*.csv -text
