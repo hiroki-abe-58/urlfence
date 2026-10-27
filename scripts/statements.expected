@@ -90,3 +90,7 @@ STATEMENT UrlFence.Addr.allows_of_add_deny4 : ∀ (cfg : UrlFence.Addr.Config) (
 DEPSHA UrlFence.Addr.allows_of_add_deny4 fdb69830fb78918c2ade913b9cc0c698e2f31f5d493cfaa6df8f968c7e7a2194
 STATEMENT UrlFence.Addr.allows_of_add_deny6 : ∀ (cfg : UrlFence.Addr.Config) (q : UrlFence.Addr.Prefix 128) (a : UrlFence.Addr), { deny4 := cfg.deny4, deny6 := q :: cfg.deny6, nat64 := cfg.nat64 }.allows a = true → cfg.allows a = true
 DEPSHA UrlFence.Addr.allows_of_add_deny6 ff01273ffcacf513e34f41b5b52275a376ab1459f3b2a108294d55e75ac4a80e
+STATEMENT UrlFence.Addr.Prefix.contains_iff_getMsbD : ∀ {w : Nat} (p : UrlFence.Addr.Prefix w) (a : BitVec w), p.contains a = true ↔ ∀ (i : Nat), i < p.len → a.getMsbD i = p.base.getMsbD i
+DEPSHA UrlFence.Addr.Prefix.contains_iff_getMsbD eac872c61221096602dac31c528ee6fda243978ed65f2da5e8320806c53af1d5
+STATEMENT UrlFence.Addr.parse4_isSome_iff : ∀ (s : List Char), (UrlFence.Addr.parse4 s).isSome = true ↔ ∃ ps, UrlFence.parseHost s = some (UrlFence.Host.ipv4 ps)
+DEPSHA UrlFence.Addr.parse4_isSome_iff da12d635c1f96b64cedb6dcbb8dad77c8a76fb06c5c4ab9b77f6231e1fe21830

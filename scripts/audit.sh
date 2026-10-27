@@ -28,7 +28,8 @@ PUBLISHED="join_split split_join split_append_sep join_append parseHost_render p
   Addr.allows6_iff Addr.check_allow_iff Addr.registry4_denied Addr.multicast4_denied Addr.registry6_denied
   Addr.outside_global_denied Addr.sixToFour_denied Addr.teredo_denied Addr.mapped_allows_iff
   Addr.mapped_denied Addr.nat64_allows_iff Addr.nat64_denied Addr.isatap_denied Addr.allows_of_add_deny4
-  Addr.allows_of_add_deny6"
+  Addr.allows_of_add_deny6
+  Addr.Prefix.contains_iff_getMsbD Addr.parse4_isSome_iff"
 
 # 1. Build configuration, checked before anything runs Lake (a lakefile is code that Lake executes).
 #    Any change to these files must update the hashes here, in plain sight. Pinning them rules out

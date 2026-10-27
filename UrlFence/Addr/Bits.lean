@@ -5,9 +5,10 @@ import UrlFence.Host
 
 An IPv4 address is a `BitVec 32` and an IPv6 address a `BitVec 128`; the first bit on the wire is
 the most significant one. A prefix `⟨base, len⟩` of a `w`-bit address contains `a` when the first
-`len` bits of `a` are those of `base`: shifting both right by `w - len` keeps exactly those bits
-(`Prefix.contains_iff`). For a block whose other bits are zero, as in the registries, that is the
-range `base ≤ a < base + 2 ^ (w - len)` (`Prefix.contains_iff_range`).
+`len` bits of `a` are those of `base` (`Prefix.contains_iff_getMsbD`): `Prefix.contains` shifts both
+right by `w - len`, which keeps exactly those bits, and compares. On the numeric values that is
+equal quotients by `2 ^ (w - len)` (`Prefix.contains_iff`), and for a block whose other bits are
+zero, as in the registries, the range `base ≤ a < base + 2 ^ (w - len)` (`Prefix.contains_iff_range`).
 
 `digits b k n` are the last `k` digits of `n` in base `b`, most significant first, and `ofDigits`
 reads them back (`ofDigits_digits`). Octets and 16-bit groups are digits in base 256 and 65536.
@@ -45,6 +46,32 @@ theorem shift_beq_iff {w : Nat} (a b : BitVec w) (k : Nat) :
 theorem Prefix.contains_iff {w : Nat} (p : Prefix w) (a : BitVec w) :
     p.contains a = true ↔ a.toNat / 2 ^ (w - p.len) = p.base.toNat / 2 ^ (w - p.len) :=
   shift_beq_iff _ _ _
+
+/-- Prefix membership bit by bit: the first `p.len` bits of `a`, most significant first, are those of
+`p.base`. -/
+theorem Prefix.contains_iff_getMsbD {w : Nat} (p : Prefix w) (a : BitVec w) :
+    p.contains a = true ↔ ∀ i, i < p.len → a.getMsbD i = p.base.getMsbD i := by
+  unfold Prefix.contains
+  rw [beq_iff_eq]
+  constructor
+  · intro h i hi
+    by_cases hw : i < w
+    · rw [BitVec.getMsbD_eq_getLsbD, BitVec.getMsbD_eq_getLsbD]
+      simp only [hw, decide_true, Bool.true_and]
+      have := congrArg (fun x => x.getLsbD (w - 1 - i - (w - p.len))) h
+      simp only [BitVec.getLsbD_ushiftRight] at this
+      rwa [show w - p.len + (w - 1 - i - (w - p.len)) = w - 1 - i by omega] at this
+    · rw [BitVec.getMsbD_of_ge _ _ (by omega), BitVec.getMsbD_of_ge _ _ (by omega)]
+  · intro h
+    apply BitVec.eq_of_getLsbD_eq
+    intro j hj
+    rw [BitVec.getLsbD_ushiftRight, BitVec.getLsbD_ushiftRight]
+    by_cases hk : w - p.len + j < w
+    · have := h (w - 1 - (w - p.len + j)) (by omega)
+      rw [BitVec.getMsbD_eq_getLsbD, BitVec.getMsbD_eq_getLsbD] at this
+      simp only [show w - 1 - (w - p.len + j) < w by omega, decide_true, Bool.true_and] at this
+      rwa [show w - 1 - (w - 1 - (w - p.len + j)) = w - p.len + j by omega] at this
+    · rw [BitVec.getLsbD_of_ge _ _ (by omega), BitVec.getLsbD_of_ge _ _ (by omega)]
 
 theorem div_pow_eq_of_le {x y i j : Nat} (h : x / 2 ^ i = y / 2 ^ i) (hij : i ≤ j) :
     x / 2 ^ j = y / 2 ^ j := by

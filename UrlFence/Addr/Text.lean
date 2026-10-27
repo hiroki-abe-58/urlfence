@@ -4,7 +4,8 @@ import UrlFence.Addr.Registry
 # Addresses as text
 
 * **IPv4**: four dotted-decimal parts `0` to `255` without leading zeros, as in `UrlFence.parseHost`
-  (`ipv4Ok`). `127.1`, `0x7f.0.0.1` and `017.0.0.1` are refused.
+  (`ipv4Ok`): `parse4` accepts exactly the strings that `parseHost` reads as IPv4 addresses
+  (`parse4_isSome_iff`). `127.1`, `0x7f.0.0.1` and `017.0.0.1` are refused.
 * **IPv6**: the text forms of RFC 4291, section 2.2: eight groups of 1 to 4 hex digits in either
   case, separated by `:`; at most one `::` standing for one or more zero groups; the last two
   groups may be written as a dotted quad in the IPv4 form above (`::ffff:192.0.2.1`). Zone IDs
@@ -70,6 +71,27 @@ theorem parse4_render4 (a : BitVec 32) : parse4 (render4 a) = some a := by
   have := a.isLt
   simp only [BitVec.toNat_ofNat] at this ⊢
   omega
+
+/-- `parse4` accepts exactly the strings that `parseHost`, the host parser of URLs, reads as IPv4
+addresses. -/
+theorem parse4_isSome_iff (s : List Char) :
+    (parse4 s).isSome = true ↔ ∃ ps, parseHost s = some (.ipv4 ps) := by
+  unfold parse4 parseHost
+  by_cases hv : ipv4Ok (split '.' s) = true
+  · have hall : s.all (fun c => isDigit c || c = '.') = true := by
+      rw [List.all_eq_true]
+      intro c hc
+      rw [← join_split '.' s] at hc
+      rcases mem_join '.' _ c hc with h | ⟨q, hq, hcq⟩
+      · simp [h]
+      · simp only [ipv4Ok, Bool.and_eq_true, List.all_eq_true] at hv
+        simp [octetOk_digits q (hv.2 q hq) c hcq]
+    simp [hv, hall]
+  · simp only [hv, Bool.false_eq_true, ↓reduceIte, Option.isSome_none, false_iff]
+    rintro ⟨ps, hps⟩
+    split at hps
+    · cases hps
+    · split at hps <;> cases hps
 
 /-! ## IPv6 -/
 
