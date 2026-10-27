@@ -179,6 +179,11 @@ and JSON output are ordinary code, covered by tests.
   backslash check also lets a backslash through in the path, query or fragment, with the host
   unchanged.
 
+[`scripts/reproduce.sh`](scripts/reproduce.sh) runs all of this from a fresh clone of the current
+commit in a temporary directory: the pins, the build, the audit, the tests, the client comparison
+on the full corpus and the mutation check, and prints the binary's SHA-256. It takes about a minute
+and, like CI, fails if node or curl is missing.
+
 ## Usage
 
 Build with [elan](https://github.com/leanprover/elan) installed:
