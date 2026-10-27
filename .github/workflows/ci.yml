@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: leanprover/lean-action@24581d74d674803a25a81b10b059c5c0cdd344c6 # v1.6.2
+      - name: Proof audit (forbidden keywords, imports, axioms of every declaration, leanchecker)
+        run: ./scripts/audit.sh
+      - name: CLI tests (fixed cases; WHATWG differential with the runner's node)
+        run: python3 -m unittest discover -s tests -v
+      - name: Mutation check (every planted bug must be caught)
+        run: python3 tests/mutants.py
