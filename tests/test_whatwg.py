@@ -15,8 +15,11 @@ HOSTS = ["example.com", "docs.example.com", "a.b.example.com", "attacker-example
          "example.123", "foo.0x7f", "Example.com", "xn--bcher-kva.example", "bücher.example", "a_b.example.com",
          "-a.example.com", "a-.example.com", "example.com.", ".example.com", "localhost", "[::1]",
          "[::ffff:127.0.0.1]", "example.com%2eevil.com", "a" * 64 + ".com", "1.example.com"]
-AUTH_EXTRA = ["", "", "", ":443", ":8443", ":", ":08443", ":99999", "@evil.com", ":pass@evil.com",
-              "%40evil.com", "\\@evil.com", "\t.evil.com", " ", "#@evil.com", "?@evil.com", ".evil.com"]
+AUTH_EXTRA = ["", "", "", ":443", ":8443", ":", ":0", ":08443", ":99999", "@evil.com", ":pass@evil.com",
+              "%40evil.com", "\\@evil.com", "\t.evil.com", " ", "#@evil.com", "?@evil.com", ".evil.com",
+              ";.evil.com", "!.evil.com", ",evil.com", "&x=.evil.com", "'.evil.com", "*.evil.com"]
+# Every printable ASCII character, for insertion into hosts.
+PRINTABLE = [chr(c) for c in range(0x21, 0x7f)]
 RESTS = ["", "/", "/a/b", "/a?b#c", "?x=//evil.com", "#frag", "/@evil.com", "/..%2f", "/é"]
 
 ALLOW = ["example.com", "*.example.com", "127.0.0.1", "localhost"]
@@ -28,10 +31,16 @@ VALID_HOSTS = ["example.com", "docs.example.com", "a.b.example.com", "evil.examp
 
 
 def random_url(rng):
-    if rng.random() < 0.6:
+    r = rng.random()
+    if r < 0.5:
         # Mostly well-formed, so that allow and deny both occur often.
         return (rng.choice(["https://", "http://"]) + rng.choice(VALID_HOSTS) +
                 rng.choice(["", "", ":443", ":8443", ":80"]) + rng.choice(RESTS))
+    if r < 0.75:
+        # A printable character inserted somewhere in a valid host: the authority boundary.
+        h = rng.choice(VALID_HOSTS)
+        i = rng.randint(0, len(h))
+        return rng.choice(["https://", "http://"]) + h[:i] + rng.choice(PRINTABLE) + h[i:] + rng.choice(RESTS)
     return rng.choice(SCHEMES) + rng.choice(HOSTS) + rng.choice(AUTH_EXTRA) + rng.choice(RESTS)
 
 

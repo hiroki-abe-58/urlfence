@@ -1,12 +1,6 @@
-import
-UrlFence.Api
-import
-UrlFence.Examples
-import
-UrlFence.Host
-import
-UrlFence.Policy
-import
-UrlFence.Split
-import
-UrlFence.Url
+import UrlFence.Split
+import UrlFence.Host
+import UrlFence.Url
+import UrlFence.Policy
+import UrlFence.Api
+import UrlFence.Examples

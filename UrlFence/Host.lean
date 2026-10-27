@@ -27,9 +27,11 @@ def isLDH (c : Char) : Bool := isLower c || isDigit c || c = '-'
 /-- The value of a string of decimal digits. -/
 def decValue (l : List Char) : Nat := l.foldl (fun n c => 10 * n + (c.toNat - '0'.toNat)) 0
 
-/-- A DNS label: 1 to 63 lowercase letters, digits and hyphens, not starting or ending with `-`. -/
+/-- A DNS label: 1 to 63 lowercase letters, digits and hyphens, not starting or ending with `-`, and
+not an IDNA A-label (`xn--…`), which WHATWG parsers decode and may reject. -/
 def labelOk (l : List Char) : Bool :=
-  0 < l.length && l.length ≤ 63 && l.all isLDH && l.head? != some '-' && l.getLast? != some '-'
+  0 < l.length && l.length ≤ 63 && l.all isLDH && l.head? != some '-' && l.getLast? != some '-' &&
+    l.take 4 != ['x', 'n', '-', '-']
 
 /-- What the WHATWG parser takes for an IPv4 number when it is the last label. -/
 def numberLike (l : List Char) : Bool :=
@@ -94,10 +96,13 @@ theorem parseHost_valid (s : List Char) (h : Host) (hp : parseHost s = some h) :
     · rename_i hv; injection hp with hp; subst hp; exact hv
     · exact absurd hp (by simp)
 
+theorem labelOk_ldh (l : List Char) (h : labelOk l = true) : ∀ c ∈ l, isLDH c = true := by
+  simp only [labelOk, Bool.and_eq_true, List.all_eq_true] at h
+  exact h.1.1.1.2
+
 theorem labelOk_noDot (l : List Char) (h : labelOk l = true) : '.' ∉ l := by
   intro hm
-  simp only [labelOk, Bool.and_eq_true, List.all_eq_true] at h
-  have := h.1.1.2 '.' hm
+  have := labelOk_ldh l h '.' hm
   simp [isLDH, isLower, isDigit] at this
 
 /-- The labels of a valid domain contain no dot. -/
@@ -108,5 +113,34 @@ theorem domainOk_noDot (ls : List (List Char)) (h : domainOk ls = true) : ∀ l 
 
 theorem domainOk_ne_nil (ls : List (List Char)) (h : domainOk ls = true) : ls ≠ [] := by
   rintro rfl; simp [domainOk] at h
+
+/-- A parsed host is made of lowercase letters, digits, `-` and `.` only, so it contains none of the
+characters that end or split an authority (`/`, `?`, `#`, `:`, `@`, `[`, `]`). -/
+theorem parseHost_chars (s : List Char) (h : Host) (hp : parseHost s = some h) :
+    ∀ c ∈ h.render, ('a' ≤ c ∧ c ≤ 'z') ∨ ('0' ≤ c ∧ c ≤ '9') ∨ c = '-' ∨ c = '.' := by
+  rw [parseHost_render s h hp]
+  unfold parseHost at hp
+  split at hp
+  · rename_i hall
+    intro c hc
+    have := List.all_eq_true.mp hall c hc
+    simp only [isDigit, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq] at this
+    rcases this with ⟨h1, h2⟩ | h3
+    · exact Or.inr (Or.inl ⟨h1, h2⟩)
+    · exact Or.inr (Or.inr (Or.inr h3))
+  · split at hp
+    · rename_i hdom
+      intro c hc
+      rw [← join_split '.' s] at hc
+      rcases mem_join '.' _ c hc with h | ⟨q, hq, hcq⟩
+      · exact Or.inr (Or.inr (Or.inr h))
+      · simp only [domainOk, Bool.and_eq_true, List.all_eq_true] at hdom
+        have := labelOk_ldh q (hdom.1.1.2 q hq) c hcq
+        simp only [isLDH, isLower, isDigit, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq] at this
+        rcases this with (⟨h1, h2⟩ | ⟨h1, h2⟩) | h3
+        · exact Or.inl ⟨h1, h2⟩
+        · exact Or.inr (Or.inl ⟨h1, h2⟩)
+        · exact Or.inr (Or.inr (Or.inl h3))
+    · exact absurd hp (by simp)
 
 end UrlFence

@@ -41,6 +41,13 @@ CASES = [
     ("https://docs.python.org:8443/a?b#c", "allow", "docs.python.org"),
     ("https://bücher.example.com/", "reject", "chars"),
     ("", "reject", "scheme"),
+    # The authority ends only at `/`, `?` or `#`; other punctuation is refused in the host.
+    ("https://docs.python.org;.evil.com/", "reject", "host"),
+    ("https://docs.python.org!.evil.com/", "reject", "host"),
+    ("https://docs.python.org,evil.com/", "reject", "host"),
+    # IDNA A-labels and port 0 are refused.
+    ("https://xn--a.example.com/", "reject", "host"),
+    ("https://docs.python.org:0/", "reject", "port"),
     # The path, query and fragment never change the host.
     ("https://docs.python.org/@evil.com", "allow", "docs.python.org"),
     ("https://docs.python.org#@evil.com", "allow", "docs.python.org"),

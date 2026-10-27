@@ -15,7 +15,7 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-MATCH = "  | .sub d, .domain ls => decide (d.length < ls.length) && d.isSuffixOf ls\n"
+MATCH = "  | .sub d, .domain ls => !d.isEmpty && decide (d.length < ls.length) && d.isSuffixOf ls\n"
 CHECK = "    if pol.schemes.contains u.scheme && pol.allow.any (·.matches u.host) && !pol.deny.any (·.matches u.host)\n"
 
 # name -> list of (file, old text, new text)
@@ -35,7 +35,7 @@ MUTANTS = {
          "def okChar (c : Char) : Bool := '!' ≤ c && c ≤ '~'")],
     # Other plausible slips.
     "M6 subdomain pattern also matches the domain itself": [
-        ("UrlFence/Policy.lean", MATCH, "  | .sub d, .domain ls => decide (d.length ≤ ls.length) && d.isSuffixOf ls\n")],
+        ("UrlFence/Policy.lean", MATCH, "  | .sub d, .domain ls => !d.isEmpty && decide (d.length ≤ ls.length) && d.isSuffixOf ls\n")],
     "M7 deny patterns ignored": [
         ("UrlFence/Policy.lean", CHECK, "    if pol.schemes.contains u.scheme && pol.allow.any (·.matches u.host)\n")],
     "M8 scheme not checked": [
@@ -48,6 +48,13 @@ MUTANTS = {
     "M11 ports with leading zeros": [
         ("UrlFence/Url.lean", "  0 < p.length && p.length ≤ 5 && p.all isDigit && (p.length = 1 || p.head? != some '0') &&\n",
          "  0 < p.length && p.length ≤ 5 && p.all isDigit &&\n")],
+    "M13 `;` also ends the authority (the boundary a reviewer probed)": [
+        ("UrlFence/Url.lean", "def isDelim (c : Char) : Bool := c = '/' || c = '?' || c = '#'",
+         "def isDelim (c : Char) : Bool := c = '/' || c = '?' || c = '#' || c = ';'")],
+    "M14 IDNA A-labels (xn--) accepted": [
+        ("UrlFence/Host.lean", " &&\n    l.take 4 != ['x', 'n', '-', '-']", "")],
+    "M15 port 0 accepted": [
+        ("UrlFence/Url.lean", "    decValue p ≤ 65535 && p != ['0']", "    decValue p ≤ 65535")],
     "M12 uppercase letters accepted in hosts": [
         ("UrlFence/Host.lean", "def isLower (c : Char) : Bool := 'a' ≤ c && c ≤ 'z'",
          "def isLower (c : Char) : Bool := ('a' ≤ c && c ≤ 'z') || ('A' ≤ c && c ≤ 'Z')")],

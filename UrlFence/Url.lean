@@ -57,9 +57,11 @@ def okChar (c : Char) : Bool := '!' ≤ c && c ≤ '~' && c ≠ '\\'
 /-- The characters that end the authority. -/
 def isDelim (c : Char) : Bool := c = '/' || c = '?' || c = '#'
 
+/-- A port: 1 to 65535, written without leading zeros. (Port 0 is refused: some clients silently
+replace it with the default port.) -/
 def portOk (p : List Char) : Bool :=
   0 < p.length && p.length ≤ 5 && p.all isDigit && (p.length = 1 || p.head? != some '0') &&
-    decValue p ≤ 65535
+    decValue p ≤ 65535 && p != ['0']
 
 def parseScheme : List Char → Option (Scheme × List Char)
   | 'h' :: 't' :: 't' :: 'p' :: 's' :: ':' :: '/' :: '/' :: r => some (.https, r)
@@ -196,5 +198,56 @@ theorem parse_no_userinfo (s : List Char) (u : Url) (h : parse s = .ok u) :
                 show '@' ∉ (s.drop sc.pre.length).takeWhile (fun c => !isDelim c)
                 rw [parseScheme_spec s r sc hsc, List.drop_left]
                 exact hat
+
+/-- The authority ends at exactly these three characters. -/
+theorem isDelim_iff (c : Char) : isDelim c = true ↔ c = '/' ∨ c = '?' ∨ c = '#' := by
+  simp [isDelim, or_assoc]
+
+theorem dropWhile_head {α : Type} (p : α → Bool) (l : List α) :
+    l.dropWhile p = [] ∨ ∃ c t, l.dropWhile p = c :: t ∧ p c = false := by
+  induction l with
+  | nil => simp
+  | cons a as ih =>
+    by_cases ha : p a
+    · simp only [List.dropWhile_cons, ha, ite_true]; exact ih
+    · simp only [List.dropWhile_cons, ha]
+      exact Or.inr ⟨a, as, rfl, by simpa using ha⟩
+
+/-- In an accepted URL, the authority (the text after `//` up to the first `/`, `?`, `#` or the end)
+is exactly the host followed by the optional `:port`, and the rest starts with one of those three
+characters. With `parseHost_chars`, the host is therefore the text after `//` up to the first `:`,
+`/`, `?`, `#` or the end: the reading every WHATWG parser takes for such a string. -/
+theorem parse_authority (s : List Char) (u : Url) (h : parse s = .ok u) :
+    (s.drop u.scheme.pre.length).takeWhile (fun c => !isDelim c) = u.host.render ++ portPart u.port ∧
+      (u.rest = [] ∨ ∃ c t, u.rest = c :: t ∧ (c = '/' ∨ c = '?' ∨ c = '#')) := by
+  unfold parse at h
+  split at h
+  · exact absurd h (by simp)
+  · split at h
+    · exact absurd h (by simp)
+    · rename_i sc r hsc
+      simp only at h
+      split at h
+      · exact absurd h (by simp)
+      · split at h
+        · exact absurd h (by simp)
+        · split at h
+          · exact absurd h (by simp)
+          · split at h
+            · exact absurd h (by simp)
+            · rename_i hs port hsp
+              split at h
+              · exact absurd h (by simp)
+              · rename_i host hh
+                injection h with h; subst h
+                refine ⟨?_, ?_⟩
+                · show (s.drop sc.pre.length).takeWhile (fun c => !isDelim c) = host.render ++ portPart port
+                  rw [parseScheme_spec s r sc hsc, List.drop_left, parseHost_render hs host hh,
+                    ← splitPort_spec _ _ _ hsp]
+                · show r.dropWhile (fun c => !isDelim c) = [] ∨ _
+                  rcases dropWhile_head (fun c => !isDelim c) r with he | ⟨c, t, he, hc⟩
+                  · exact Or.inl he
+                  · refine Or.inr ⟨c, t, he, (isDelim_iff c).mp ?_⟩
+                    simpa using hc
 
 end UrlFence

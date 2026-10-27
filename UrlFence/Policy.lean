@@ -25,21 +25,27 @@ inductive Pattern where
 
 def Pattern.matches : Pattern → Host → Bool
   | .exact h', h => decide (h' = h)
-  | .sub d, .domain ls => decide (d.length < ls.length) && d.isSuffixOf ls
+  | .sub d, .domain ls => !d.isEmpty && decide (d.length < ls.length) && d.isSuffixOf ls
   | .sub _, .ipv4 _ => false
+
+/-- An exact pattern matches exactly its own host. -/
+theorem exact_matches_iff (h' h : Host) : (Pattern.exact h').matches h = true ↔ h' = h := by
+  simp [Pattern.matches]
 
 theorem sub_not_ipv4 (d ps : List (List Char)) : (Pattern.sub d).matches (.ipv4 ps) = false := rfl
 
-/-- A subdomain pattern matches exactly the domains that add at least one label in front. -/
+/-- A subdomain pattern matches exactly the domains that add at least one label in front of a
+non-empty domain. (`.sub []`, which `parsePattern` never produces, matches nothing.) -/
 theorem sub_matches_iff (d ls : List (List Char)) :
-    (Pattern.sub d).matches (.domain ls) = true ↔ ∃ pre, pre ≠ [] ∧ ls = pre ++ d := by
-  simp only [Pattern.matches, Bool.and_eq_true, decide_eq_true_eq, List.isSuffixOf_iff_suffix]
+    (Pattern.sub d).matches (.domain ls) = true ↔ d ≠ [] ∧ ∃ pre, pre ≠ [] ∧ ls = pre ++ d := by
+  simp only [Pattern.matches, Bool.and_eq_true, Bool.not_eq_true', List.isEmpty_eq_false_iff,
+    decide_eq_true_eq, List.isSuffixOf_iff_suffix]
   constructor
-  · rintro ⟨hlen, pre, rfl⟩
-    refine ⟨pre, ?_, rfl⟩
+  · rintro ⟨⟨hd, hlen⟩, pre, rfl⟩
+    refine ⟨hd, pre, ?_, rfl⟩
     rintro rfl; simp at hlen
-  · rintro ⟨pre, hpre, rfl⟩
-    refine ⟨?_, ⟨pre, rfl⟩⟩
+  · rintro ⟨hd, pre, hpre, rfl⟩
+    refine ⟨⟨hd, ?_⟩, ⟨pre, rfl⟩⟩
     have : 0 < pre.length := List.length_pos_iff.mpr hpre
     simp; omega
 
@@ -47,8 +53,8 @@ theorem sub_matches_iff (d ls : List (List Char)) :
 followed by `d`. Without the dot, `attacker-example.com` would match `example.com`. -/
 theorem sub_matches_iff_render (d ls : List (List Char)) (hd : domainOk d = true) (hl : domainOk ls = true) :
     (Pattern.sub d).matches (.domain ls) = true ↔ ('.' :: join '.' d) <:+ join '.' ls := by
-  rw [sub_matches_iff]
   have hdne := domainOk_ne_nil d hd
+  rw [sub_matches_iff, and_iff_right hdne]
   constructor
   · rintro ⟨pre, hpre, rfl⟩
     refine ⟨join '.' pre, ?_⟩

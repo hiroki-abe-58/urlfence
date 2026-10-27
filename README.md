@@ -20,7 +20,7 @@ Status: v0.1.0, experimental.
 
 ## Why
 
-Allowlist checks on URLs keep failing in the same few ways, recently in several AI-agent tools:
+Checks on URLs keep failing in the same few ways, including in AI-agent tools:
 
 * **A string prefix or suffix instead of a hostname comparison:**
   * [CVE-2026-24052](https://www.cve.org/CVERecord?id=CVE-2026-24052), Claude Code WebFetch before
@@ -34,7 +34,8 @@ Allowlist checks on URLs keep failing in the same few ways, recently in several 
 * **Normalising before checking:** [CVE-2026-6322](https://www.cve.org/CVERecord?id=CVE-2026-6322),
   fast-uri before 3.1.2, decoded a percent-encoded `@` in the host.
 * **IP literals in unexpected forms:** [CVE-2026-49857](https://www.cve.org/CVERecord?id=CVE-2026-49857),
-  auth-fetch-mcp before 3.0.2, missed an IPv4-mapped IPv6 loopback address.
+  auth-fetch-mcp before 3.0.2: its private-address blocklist missed an IPv4-mapped IPv6 loopback
+  address.
 
 The advisories' common lesson is to parse first, then compare hostnames exactly or by a dot-bounded
 suffix. URLFence does that, with theorems about what it decides.
@@ -47,13 +48,15 @@ A URL is accepted only in this form, and refused with a reason otherwise:
 
 1. Every character is printable ASCII other than space and backslash (`chars`).
    * Browsers strip tabs and newlines, and read `\` as `/`.
-   * Non-ASCII hosts (IDNA) are not supported.
+   * Non-ASCII hosts (IDNA) are not supported, and neither are IDNA A-labels (`xn--…`), which
+     WHATWG parsers decode and may reject.
 2. It starts with `http://` or `https://`, in lowercase (`scheme`). `https:/x`, `https:x`, `HTTPS://x`
    and other forms a browser accepts are refused.
 3. The authority (up to the first `/`, `?` or `#`) has no `@` (`userinfo`), no `%` (`percent`), and
    no `[` or `]` (`ipv6`: IPv6 literals are not supported).
-4. The authority is a host, optionally followed by `:` and a port. The port is 1 to 5 digits, with no
-   leading zero, at most 65535 (`port`).
+4. The authority is a host, optionally followed by `:` and a port. The port is 1 to 65535, written
+   without leading zeros (`port`). Port 0 is refused, since some clients silently replace it with the
+   default port.
 5. The host (`host`) is one of:
    * **a domain:** lowercase labels of `a-z`, `0-9` and `-`, 1 to 63 characters each, not starting
      or ending with `-`, at most 253 characters in all, with no trailing dot. The last label must not
@@ -73,19 +76,22 @@ otherwise), its host matches an allowed pattern, and it matches no denied patter
 ## What is proven
 
 The theorems are in [`UrlFence/`](UrlFence), checked by Lean v4.35.0, with no `sorry` and only
-Lean's standard axioms. [`scripts/audit.sh`](scripts/audit.sh) checks this. It requires the 18
-theorems below by name, and checks the axioms of all 163 theorem declarations in the library's
-modules, counting helper and generated equation lemmas.
+Lean's standard axioms. [`scripts/audit.sh`](scripts/audit.sh) checks this, for every declaration in
+the library's modules (helper and generated lemmas included), and pins the published theorems
+below; see [How it is checked](#how-it-is-checked).
 
 | Theorem | Statement |
 | --- | --- |
-| `parse_render` | An accepted string is exactly the printed form of its parse: no normalisation, a single reading. |
+| `parse_authority`, `isDelim_iff` | In an accepted URL, the authority (from `//` up to the first `/`, `?`, `#` or the end; exactly those three characters) is the host followed by the optional `:port`, and the rest starts with one of those characters. |
+| `parseHost_chars` | The host consists of `a-z`, `0-9`, `-` and `.` only, so it contains none of `/ ? # : @ [ ]`. With `parse_authority`, the host is the text between `//` and the first `:`, `/`, `?`, `#` or the end. |
+| `parse_render` | An accepted string is exactly the printed form of its parse: nothing is normalised. |
 | `parse_no_userinfo` | In an accepted URL, nothing between `//` and the first `/`, `?` or `#` is an `@`. |
 | `parse_valid`, `parseHost_valid`, `parseHost_render` | The host of an accepted URL is in one of the accepted forms, and prints back to exactly its text. |
 | `parseScheme_spec`, `splitPort_spec` | The scheme prefix and the port are split off exactly as written. |
 | `check_allow_iff` | `check` allows a URL **iff** it parses, its scheme is allowed, its host matches an allowed pattern, and it matches no denied pattern. |
 | `check_allow_of_add_deny` | Adding a denied pattern never allows more. |
-| `sub_matches_iff` | `*.d` matches a domain **iff** the domain is `d` with at least one label in front. |
+| `exact_matches_iff` | An exact pattern matches exactly its own host. |
+| `sub_matches_iff` | `*.d` matches a domain **iff** `d` is not empty and the domain is `d` with at least one label in front. |
 | `sub_matches_iff_render` | On printed domains, `*.d` matches **iff** the host ends with `.` followed by `d`. This is the dot boundary whose absence caused the suffix bugs above. |
 | `sub_not_ipv4` | A subdomain pattern never matches an IPv4 address. |
 | `parsePattern_sub_valid` | A parsed subdomain pattern is a valid domain. |
@@ -93,8 +99,9 @@ modules, counting helper and generated equation lemmas.
 
 ### Where the proofs end
 
-The theorems say what URLFence's own parser and matcher do. **That a WHATWG URL parser (what
-browsers and Node use) reads every accepted URL the same way is tested, not proven.**
+The theorems say what URLFence's own parser and matcher do, and pin the reading of an accepted URL
+(the host is exactly the text between `//` and the first `:`, `/`, `?`, `#`). **That a WHATWG URL
+parser (what browsers and Node use) reads every accepted URL the same way is tested, not proven.**
 
 The CLI ([`Main.lean`](Main.lean)) calls the library directly. Its argument parsing, stdin decoding
 and JSON output are ordinary code, covered by tests.
@@ -112,17 +119,22 @@ and JSON output are ordinary code, covered by tests.
   * that `leanchecker` replays every module.
 * `tests/test_cases.py` runs fixed cases in the style of the advisories, and checks the CLI's
   contract.
-* `tests/test_whatwg.py` compares URLFence with Node's WHATWG `URL` on about 7,400 random and
-  adversarial URLs. For every URL URLFence accepts, WHATWG must read:
+* `tests/test_whatwg.py` compares URLFence with Node's WHATWG `URL` on about 10,000 random and
+  adversarial URLs, including every printable ASCII character inserted into hosts. For every URL
+  URLFence accepts, WHATWG must read:
   * the same scheme, host and port (`:443` and `:80` count as the default);
   * no userinfo;
   * a host for which the matching rules give the same decision.
 
-  URLFence may refuse what WHATWG accepts, and on these inputs it refuses about 5,000 such URLs.
+  URLFence may refuse what WHATWG accepts, and on these inputs it refuses about 6,000 such URLs.
   Skipped if `node` is not installed.
-* `tests/mutants.py` plants 12 plausible bugs, including the CVE-style prefix, suffix, userinfo and
-  percent mistakes, and requires each one to be caught. So far every one fails the build, either in
-  a theorem or in a build-time example, and the script reports which file.
+* `tests/mutants.py` plants 15 plausible bugs, one at a time, and requires each one to be caught.
+  They include the CVE-style prefix and suffix mistakes, a wrong authority boundary, and accepting
+  octal IPv4 parts. So far every one fails the build, and the script names the file: a theorem or a
+  build-time example. Some fail only because a proof script no longer fits the changed code, not
+  because a statement became false. Three of them change only the reason for a rejection, since the
+  host grammar refuses those characters anyway: dropping the userinfo check, the percent check or
+  the backslash check.
 
 ## Usage
 
@@ -159,6 +171,11 @@ From Lean, build a policy with `UrlFence.Policy.make` and call `Policy.checkStri
   a trailing dot, short IPv4 forms. Normalise them yourself only if you then check the normalised
   string.
 * **Ports and paths.** They are reported, but patterns do not restrict them.
+* **Passing the URL on.** Hand the URL to the client as a single argument, never through a shell. The
+  path may contain shell metacharacters and curl glob characters (`[`, `{`), so use `curl -g`.
+* **CLI input.** A stdin line ending in `\r` (CRLF) is refused as `chars`. An argument that is not
+  valid UTF-8 reaches the program with U+FFFD and is refused as `chars`; only stdin reports the bytes
+  (`input_hex`).
 
 ## Related work
 

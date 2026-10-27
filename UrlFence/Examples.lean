@@ -19,14 +19,16 @@ They show what URLFence decides for those inputs. They do not reproduce the orig
 namespace UrlFence.Examples
 open UrlFence
 
-def pol (allow : List String) (deny : List String := []) : Policy :=
-  (Policy.make ["https"] allow deny).getD { schemes := [], allow := [], deny := [] }
-
+/-- The decision for `s` under an https-only policy, as a short string. A pattern that does not
+parse gives "bad policy", so no example can pass against an accidentally empty policy. -/
 def decide1 (allow : List String) (s : String) : String :=
-  match (pol allow).checkString s with
-  | .allow u => "allow " ++ u.host.toString
-  | .deny u => "deny " ++ u.host.toString
-  | .reject r => "reject " ++ reprStr r
+  match Policy.make ["https"] allow [] with
+  | none => "bad policy"
+  | some pol =>
+    match pol.checkString s with
+    | .allow u => "allow " ++ u.host.toString
+    | .deny u => "deny " ++ u.host.toString
+    | .reject r => "reject " ++ reprStr r
 
 -- Prefix-matched lookalikes are other hosts.
 #guard decide1 ["modelcontextprotocol.io"] "https://modelcontextprotocol.io.example.com/x" = "deny modelcontextprotocol.io.example.com"
@@ -65,6 +67,14 @@ def decide1 (allow : List String) (s : String) : String :=
 #guard decide1 ["example.com"] "https://example.com/@evil.com" = "allow example.com"
 #guard decide1 ["example.com"] "https://example.com#@evil.com" = "allow example.com"
 #guard decide1 ["example.com"] "https://example.com?x=//evil.com" = "allow example.com"
+-- The authority ends only at `/`, `?` or `#`; other punctuation is not a host character.
+#guard decide1 ["example.com"] "https://example.com;.evil.com/" = "reject UrlFence.Reason.host"
+#guard decide1 ["example.com"] "https://example.com!.evil.com/" = "reject UrlFence.Reason.host"
+#guard decide1 ["example.com"] "https://example.com,evil.com/" = "reject UrlFence.Reason.host"
+-- IDNA A-labels and port 0 are refused.
+#guard decide1 ["*.com"] "https://xn--a.com/" = "reject UrlFence.Reason.host"
+#guard decide1 ["example.com"] "https://example.com:0/" = "reject UrlFence.Reason.port"
+#guard decide1 ["Example.com"] "https://example.com/" = "bad policy"
 -- http is refused when only https is allowed.
 #guard decide1 ["example.com"] "http://example.com/" = "deny example.com"
 -- Patterns are strict too.
