@@ -58,6 +58,27 @@ MUTANTS = {
     "M12 uppercase letters accepted in hosts": [
         ("UrlFence/Host.lean", "def isLower (c : Char) : Bool := 'a' ≤ c && c ≤ 'z'",
          "def isLower (c : Char) : Bool := ('a' ≤ c && c ≤ 'z') || ('A' ≤ c && c ≤ 'Z')")],
+    # The address check (UrlFence/Addr), in the style of the advisories in Addr/Examples.lean.
+    "A1 IPv4-mapped addresses not decoded (CVE-2026-49857 style)": [
+        ("UrlFence/Addr/Check.lean", "  mapped96.contains a || cfg.nat64.any fun p =>", "  cfg.nat64.any fun p =>")],
+    "A2 embedded IPv4 address taken at the wrong offset": [
+        ("UrlFence/Addr/Check.lean", "def low32 (a : BitVec 128) : BitVec 32 := a.setWidth 32",
+         "def low32 (a : BitVec 128) : BitVec 32 := (a >>> 16).setWidth 32")],
+    "A3 6to4 row (2002::/16) dropped from the registry": [
+        ("UrlFence/Addr/Registry.lean", '  ⟨⟨ip6 [0x2002, 0, 0, 0, 0, 0, 0, 0], 16⟩, "6to4", .na⟩,\n', "")],
+    "A4 prefix length off by one": [
+        ("UrlFence/Addr/Bits.lean", "  a >>> (w - p.len) == p.base >>> (w - p.len)",
+         "  a >>> (w - p.len + 1) == p.base >>> (w - p.len + 1)")],
+    "A5 ISATAP 0200:5efe form not decoded": [
+        ("UrlFence/Addr/Check.lean", "&&& 0xfcffffff#32) == 0x00005efe#32", "&&& 0xfdffffff#32) == 0x00005efe#32")],
+    "A6 IPv4 multicast allowed": [
+        ("UrlFence/Addr/Check.lean", "  !unreachable4 v && !multicast4.contains v && !cfg.deny4.any",
+         "  !unreachable4 v && !cfg.deny4.any")],
+    "A7 64:ff9b::/96 allowed as global without decoding": [
+        ("UrlFence/Addr/Check.lean", "     else global6.contains a && !unreachable6 a &&",
+         "     else (global6.contains a || wellKnown96.contains a) && !unreachable6 a &&")],
+    "A8 the CLI ignores a NAT64 prefix that nat64Ok rejects": [
+        ("Main.lean", "      if !Addr.nat64Ok p.base then", "      if false then")],
 }
 
 
@@ -81,8 +102,13 @@ def main():
             if b.returncode != 0:
                 log = b.stdout + b.stderr
                 files = sorted({l.split("error: ", 1)[1].split(":", 1)[0] for l in log.splitlines()
-                                if "error: UrlFence/" in l})
-                layer = "build-time examples" if files == ["UrlFence/Examples.lean"] else "proofs"
+                                if "error: UrlFence/" in l or "error: Main.lean" in l})
+                if files and all(f.endswith("/Examples.lean") for f in files):
+                    layer = "build-time examples"
+                elif files and all(f.startswith("UrlFence/") for f in files):
+                    layer = "proofs"
+                else:
+                    layer = "build"
                 caught = f"build failed in {', '.join(files) or '?'} ({layer})"
                 good = not control
             else:
