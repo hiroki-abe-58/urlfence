@@ -141,7 +141,7 @@ and JSON output are ordinary code, covered by tests.
   Skipped if `node` is not installed.
 * `tests/compat.py` checks that common HTTP clients read every accepted URL as URLFence does, on a
   deterministic corpus of 41,647 URLs, 17,044 of them accepted (its size and SHA-256 are pinned in
-  the script). There are two views, reported separately:
+  the script). There are three views, reported separately:
   * parser: Node's WHATWG `URL`, Python's `urllib.parse.urlsplit` and `urllib.request.Request`,
     `urllib3.util.parse_url`, `requests` (its URL preparation, then urllib3) and curl
     (`--write-out '%{url.*}'`), with no network;
@@ -151,21 +151,41 @@ and JSON output are ordinary code, covered by tests.
     the TLS server name and the inner `Host` header are not seen. curl is always given the
     fixture as its proxy, and while the Python clients run, any address lookup other than for the
     fixture's address and port is refused and fails the run, so nothing leaves the machine. This
-    is the proxy path only: a client's direct path is not observed, and there is no Node request
-    view.
+    is the proxy path only, and there is no proxy view for Node;
+  * direct: what Node's `http.request`/`https.request` (`node`), `urllib.request`, `urllib3`,
+    `requests` and curl do with no proxy. Each connection the client opens is sent to a fixture on
+    127.0.0.1 instead of where the client was going, and that target is recorded: for Node by an
+    Agent's `createConnection` ([`tests/compat_direct.js`](tests/compat_direct.js)), for the Python
+    clients by answering the one address lookup inside `socket.create_connection` or urllib3's
+    `create_connection` with the fixture's address, and for curl by `--connect-to` rules that send
+    it to one of four fixture ports depending on whether its own host and port are URLFence's. The
+    client must connect to URLFence's host and port. For http it must send an origin-form request
+    whose `Host` header names them, without an `Authorization` header. For https it must send the
+    host as the TLS server name (SNI, read from the ClientHello; for an IPv4 host, none or the
+    address), and a Python client must be checking the certificate against the host (its
+    `server_hostname`, when it gives one). The fixture then answers 403 or a fatal TLS alert, so
+    the handshake never completes: what an allowed name resolves to (nothing is resolved), the
+    certificate check and everything inside TLS (the inner request and its `Host` header) are not
+    observed. Node refuses and reports any lookup or connection other than to the fixture, and the
+    Python clients keep the lookup guard above; curl only ever has 127.0.0.1 to connect to.
 
   A disagreement fails the run. A client that is not installed is reported as skipped, never as
   agreeing. A client that refuses an accepted URL is listed separately; `--strict` fails on it, and
   so does any view that refuses more than 1% of the URLs. `--self-test` checks that every view
-  reports a difference for each of 6 deliberately wrong expectations (host and port over http and
-  https, userinfo over http).
+  reports a difference for each of 7 deliberately wrong expectations (host and port over http and
+  https, userinfo over http), except in 6 listed cases where the client sends nothing that would
+  show one, which must then happen exactly as listed: on its direct path `urllib.request` refuses a
+  `user:password@` URL and urllib3 drops the userinfo, and requests ignores a userinfo without a
+  password. [`tests/test_compat_direct.py`](tests/test_compat_direct.py) checks the ClientHello
+  parser and the direct views' comparisons on their own.
   With Python 3.12.3, urllib3 2.0.7, requests 2.31.0, curl 8.5.0 and Node 18.19.1, the full corpus
-  gives no disagreement and one refusal: urllib3, and requests through it, parse a path that starts
-  with `//` again as an authority, and refuse `https://b//yc%80a:;` without sending anything.
-  CI runs the self-test and a fixed 1/16 subset with `--strict`, and requires `whatwg`, `urlsplit`,
-  `urllib.request` and curl; urllib3 and requests run there only if the runner has them. Run
-  `python3 tests/compat.py` for the full corpus. These are tests on this corpus and these client
-  versions, not proofs.
+  gives no disagreement in any view, and one refusal: urllib3, and requests through it, parse a
+  path that starts with `//` again as an authority, and refuse `https://b//yc%80a:;` without
+  sending anything, through the proxy and directly.
+  CI runs the self-test and a fixed 1/16 subset with `--strict`, and requires `whatwg`, `node`,
+  `urlsplit`, `urllib.request` and curl; urllib3 and requests run there only if the runner has
+  them. Run `python3 tests/compat.py` for the full corpus. These are tests on this corpus and
+  these client versions, not proofs.
 * `tests/test_guarded_fetch.py` runs the example against the real binary and an HTTP proxy on
   127.0.0.1 that stands in for the web: a redirect to another host, or to a URL with userinfo, is
   refused before it is requested, and the body is cut at `max_bytes`. Unusable answers from the
@@ -182,7 +202,7 @@ and JSON output are ordinary code, covered by tests.
 [`scripts/reproduce.sh`](scripts/reproduce.sh) runs all of this from a fresh clone of the current
 commit in a temporary directory: the pins, the build, the audit, the tests, the client comparison
 on the full corpus and the mutation check, and prints the binary's SHA-256. It takes about a minute
-and, like CI, fails if node or curl is missing.
+and a half, and, like CI, fails if node or curl is missing.
 
 ## Usage
 

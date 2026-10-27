@@ -21,9 +21,9 @@ jobs:
         run: ./scripts/audit.sh
       - name: CLI tests (fixed cases; WHATWG differential with the runner's node)
         run: python3 -m unittest discover -s tests -v
-      - name: Client compatibility (self-test, then a fixed subset; parsers, and requests through a local proxy fixture)
+      - name: Client compatibility (self-test, then a fixed subset; parsers, requests through a local proxy fixture, direct connections to a local fixture)
         run: |
           python3 tests/compat.py --self-test
-          python3 tests/compat.py --quick --strict --require whatwg,urlsplit,urllib.request,curl
+          python3 tests/compat.py --quick --strict --require whatwg,node,urlsplit,urllib.request,curl
       - name: Mutation check (every planted bug must be caught)
         run: python3 tests/mutants.py

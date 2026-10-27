@@ -39,8 +39,8 @@ step "proof audit"
 step "tests"
 python3 -m unittest discover -s tests
 step "client comparison: self-test, then the full corpus"
-python3 tests/compat.py --self-test --require whatwg,urlsplit,urllib.request,curl
-python3 tests/compat.py --require whatwg,urlsplit,urllib.request,curl
+python3 tests/compat.py --self-test --require whatwg,node,urlsplit,urllib.request,curl
+python3 tests/compat.py --require whatwg,node,urlsplit,urllib.request,curl
 step "mutation check"
 python3 tests/mutants.py
 
