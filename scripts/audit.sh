@@ -22,7 +22,13 @@ fail() { echo "audit: $*" >&2; exit 1; }
 PUBLISHED="join_split split_join split_append_sep join_append parseHost_render parseHost_valid parseHost_chars
   domainOk_noDot parseScheme_spec splitPort_spec parse_render parse_valid parse_no_userinfo parse_authority
   isDelim_iff sub_not_ipv4 exact_matches_iff sub_matches_iff sub_matches_iff_render check_allow_iff
-  check_allow_of_add_deny parsePattern_sub_valid"
+  check_allow_of_add_deny parsePattern_sub_valid
+  Addr.Prefix.contains_iff Addr.ipv4Registry_blocks Addr.ipv6Registry_blocks Addr.contains_iff_range4
+  Addr.contains_iff_range6 Addr.parse_render Addr.allows4_iff Addr.embeds_iff Addr.nat64Ok_iff
+  Addr.allows6_iff Addr.check_allow_iff Addr.registry4_denied Addr.multicast4_denied Addr.registry6_denied
+  Addr.outside_global_denied Addr.sixToFour_denied Addr.teredo_denied Addr.mapped_allows_iff
+  Addr.mapped_denied Addr.nat64_allows_iff Addr.nat64_denied Addr.isatap_denied Addr.allows_of_add_deny4
+  Addr.allows_of_add_deny6"
 
 # 1. Build configuration, checked before anything runs Lake (a lakefile is code that Lake executes).
 #    Any change to these files must update the hashes here, in plain sight. Pinning them rules out

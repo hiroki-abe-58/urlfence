@@ -42,3 +42,51 @@ STATEMENT UrlFence.check_allow_of_add_deny : ∀ (pol : UrlFence.Policy) (q : Ur
 DEPSHA UrlFence.check_allow_of_add_deny 7f06cfcb767167ab1a8a0eb1e0ead84801f3fb210c5d9a80458bad737ab11750
 STATEMENT UrlFence.parsePattern_sub_valid : ∀ (s : String) (d : List (List Char)), UrlFence.parsePattern s = some (UrlFence.Pattern.sub d) → UrlFence.domainOk d = true
 DEPSHA UrlFence.parsePattern_sub_valid 94b3574a3ca0b00fbe714c6d51d844e280db1a4aadd8149792473135fa2fb7ec
+STATEMENT UrlFence.Addr.Prefix.contains_iff : ∀ {w : Nat} (p : UrlFence.Addr.Prefix w) (a : BitVec w), p.contains a = true ↔ a.toNat / 2 ^ (w - p.len) = p.base.toNat / 2 ^ (w - p.len)
+DEPSHA UrlFence.Addr.Prefix.contains_iff 2116dc7cb46adda1f6e8f1fbebcfc0371f2d53279484a494455cec67851b554f
+STATEMENT UrlFence.Addr.ipv4Registry_blocks : ∀ (r : UrlFence.Addr.Row 32), r ∈ UrlFence.Addr.ipv4Registry → r.block.len ≤ 32 ∧ r.block.base.toNat % 2 ^ (32 - r.block.len) = 0
+DEPSHA UrlFence.Addr.ipv4Registry_blocks 1f11b5357842855a6c4df10925643ec3ca7edf013ecbf89ff885112cdaa84f58
+STATEMENT UrlFence.Addr.ipv6Registry_blocks : ∀ (r : UrlFence.Addr.Row 128), r ∈ UrlFence.Addr.ipv6Registry → r.block.len ≤ 128 ∧ r.block.base.toNat % 2 ^ (128 - r.block.len) = 0
+DEPSHA UrlFence.Addr.ipv6Registry_blocks 7d6b90c5d952a9ad3718717548e15cbb2288a5ac3d0a1159fb71135d56f306c5
+STATEMENT UrlFence.Addr.contains_iff_range4 : ∀ (r : UrlFence.Addr.Row 32), r ∈ UrlFence.Addr.ipv4Registry → ∀ (a : BitVec 32), r.block.contains a = true ↔ r.block.base.toNat ≤ a.toNat ∧ a.toNat < r.block.base.toNat + 2 ^ (32 - r.block.len)
+DEPSHA UrlFence.Addr.contains_iff_range4 bb6282ff69a207f15e8a291a1bd7009226eb6c21b689b1dc0a4a13e6dec025cd
+STATEMENT UrlFence.Addr.contains_iff_range6 : ∀ (r : UrlFence.Addr.Row 128), r ∈ UrlFence.Addr.ipv6Registry → ∀ (a : BitVec 128), r.block.contains a = true ↔ r.block.base.toNat ≤ a.toNat ∧ a.toNat < r.block.base.toNat + 2 ^ (128 - r.block.len)
+DEPSHA UrlFence.Addr.contains_iff_range6 de20194b6c90b1b2a4008b52e3223aae637fdcf8f1c910d8cf62ed3a8c0f0292
+STATEMENT UrlFence.Addr.parse_render : ∀ (a : UrlFence.Addr), UrlFence.Addr.parse a.render = some a
+DEPSHA UrlFence.Addr.parse_render c22c11151f7b22cd665a46093e8194d5c5a1964abb8018c9d2e47cf328da8c74
+STATEMENT UrlFence.Addr.allows4_iff : ∀ (cfg : UrlFence.Addr.Config) (v : BitVec 32), cfg.allows4 v = true ↔ (∀ (r : UrlFence.Addr.Row 32), r ∈ UrlFence.Addr.ipv4Registry → r.reachable ≠ UrlFence.Addr.Reach.yes → r.block.contains v = false) ∧ UrlFence.Addr.multicast4.contains v = false ∧ ∀ (p : UrlFence.Addr.Prefix 32), p ∈ cfg.deny4 → p.contains v = false
+DEPSHA UrlFence.Addr.allows4_iff be540256782fd495087b4bccc729c6f172bf5347735453797a4469055ff43a42
+STATEMENT UrlFence.Addr.embeds_iff : ∀ (cfg : UrlFence.Addr.Config) (a : BitVec 128), cfg.embeds a = true ↔ UrlFence.Addr.mapped96.contains a = true ∨ ∃ p, p ∈ cfg.nat64 ∧ UrlFence.Addr.nat64Ok p = true ∧ { base := p, len := 96 }.contains a = true
+DEPSHA UrlFence.Addr.embeds_iff 9291431594f83283227afe341b0d26ab581ab140c3f93c111fde8d776a5edf93
+STATEMENT UrlFence.Addr.nat64Ok_iff : ∀ (p : BitVec 128), UrlFence.Addr.nat64Ok p = true ↔ UrlFence.Addr.wellKnown96.contains p = true ∨ UrlFence.Addr.global6.contains p = true ∧ ∀ (r : UrlFence.Addr.Row 128), r ∈ UrlFence.Addr.ipv6Registry → r.reachable ≠ UrlFence.Addr.Reach.yes → { base := p, len := 96 }.overlaps r.block = false
+DEPSHA UrlFence.Addr.nat64Ok_iff 2dbc040798f99e088eb9a1e1689a6f2fc3d4cc5a3ba7540bbfae138f69110c36
+STATEMENT UrlFence.Addr.allows6_iff : ∀ (cfg : UrlFence.Addr.Config) (a : BitVec 128), cfg.allows6 a = true ↔ (∀ (p : UrlFence.Addr.Prefix 128), p ∈ cfg.deny6 → p.contains a = false) ∧ (cfg.embeds a = true → cfg.allows4 (UrlFence.Addr.low32 a) = true) ∧ (cfg.embeds a = false → UrlFence.Addr.global6.contains a = true ∧ (∀ (r : UrlFence.Addr.Row 128), r ∈ UrlFence.Addr.ipv6Registry → r.reachable ≠ UrlFence.Addr.Reach.yes → r.block.contains a = false) ∧ (UrlFence.Addr.isatapId a = true → cfg.allows4 (UrlFence.Addr.low32 a) = true))
+DEPSHA UrlFence.Addr.allows6_iff b9a3bd0719ab1e9ef504044902a720a111169ca9b7ade5da5937b0b073c17bd3
+STATEMENT UrlFence.Addr.check_allow_iff : ∀ (cfg : UrlFence.Addr.Config) (s : List Char) (a : UrlFence.Addr), cfg.check s = UrlFence.Addr.Verdict.allow a ↔ UrlFence.Addr.parse s = some a ∧ cfg.allows a = true
+DEPSHA UrlFence.Addr.check_allow_iff 90d95a0daa13b42604f9dc6600cfa43ea564301ab73c967f9bffe83ff206eaa4
+STATEMENT UrlFence.Addr.registry4_denied : ∀ (cfg : UrlFence.Addr.Config) (r : UrlFence.Addr.Row 32), r ∈ UrlFence.Addr.ipv4Registry → r.reachable ≠ UrlFence.Addr.Reach.yes → ∀ (v : BitVec 32), r.block.contains v = true → cfg.allows (UrlFence.Addr.v4 v) = false
+DEPSHA UrlFence.Addr.registry4_denied 6bd8ab26db9eeba418805559e26a9d11bff6186e9edd43b23e6da65d9fc797cc
+STATEMENT UrlFence.Addr.multicast4_denied : ∀ (cfg : UrlFence.Addr.Config) (v : BitVec 32), UrlFence.Addr.multicast4.contains v = true → cfg.allows (UrlFence.Addr.v4 v) = false
+DEPSHA UrlFence.Addr.multicast4_denied 6897cc23b810d1acc28e4a17047ac801997ace3adb3612a1466f04eba0fd1306
+STATEMENT UrlFence.Addr.registry6_denied : ∀ (cfg : UrlFence.Addr.Config) (r : UrlFence.Addr.Row 128), r ∈ UrlFence.Addr.ipv6Registry → r.reachable ≠ UrlFence.Addr.Reach.yes → r.block ≠ UrlFence.Addr.mapped96 → ∀ (a : BitVec 128), r.block.contains a = true → cfg.allows (UrlFence.Addr.v6 a) = false
+DEPSHA UrlFence.Addr.registry6_denied 299838ab30dfc2a7964ccd414558ce65226dcc53d3668dbd957336377005a2ba
+STATEMENT UrlFence.Addr.outside_global_denied : ∀ (cfg : UrlFence.Addr.Config) (a : BitVec 128), UrlFence.Addr.global6.contains a = false → cfg.embeds a = false → cfg.allows (UrlFence.Addr.v6 a) = false
+DEPSHA UrlFence.Addr.outside_global_denied 6ace02c9c2f1f4fa5a49f814fa3d6ba7883e33f05ecee792f3829cb59734a820
+STATEMENT UrlFence.Addr.sixToFour_denied : ∀ (cfg : UrlFence.Addr.Config) (a : BitVec 128), UrlFence.Addr.sixToFour.contains a = true → cfg.allows (UrlFence.Addr.v6 a) = false
+DEPSHA UrlFence.Addr.sixToFour_denied ce3a7a4600c7885d0ccd171d9dd9ec7dbc737bc713b3049f0018b3cc885fc400
+STATEMENT UrlFence.Addr.teredo_denied : ∀ (cfg : UrlFence.Addr.Config) (a : BitVec 128), UrlFence.Addr.teredo.contains a = true → cfg.allows (UrlFence.Addr.v6 a) = false
+DEPSHA UrlFence.Addr.teredo_denied b270c75f898dc61a25acb78e850932b3e730816876e7df01a44a8bdd7903845e
+STATEMENT UrlFence.Addr.mapped_allows_iff : ∀ (cfg : UrlFence.Addr.Config) (v : BitVec 32), cfg.allows (UrlFence.Addr.v6 (UrlFence.Addr.mappedAddr v)) = true ↔ cfg.allows (UrlFence.Addr.v4 v) = true ∧ ∀ (q : UrlFence.Addr.Prefix 128), q ∈ cfg.deny6 → q.contains (UrlFence.Addr.mappedAddr v) = false
+DEPSHA UrlFence.Addr.mapped_allows_iff e03ea379a629b96ef03def43e41a781f016960186b620efac47008d06da3a04a
+STATEMENT UrlFence.Addr.mapped_denied : ∀ (cfg : UrlFence.Addr.Config) (v : BitVec 32), cfg.allows (UrlFence.Addr.v4 v) = false → cfg.allows (UrlFence.Addr.v6 (UrlFence.Addr.mappedAddr v)) = false
+DEPSHA UrlFence.Addr.mapped_denied f4f15c8792fd899a598554dd364fd25ac7ce18399bce1898eb2774a6e14c47e4
+STATEMENT UrlFence.Addr.nat64_allows_iff : ∀ (cfg : UrlFence.Addr.Config) (p : BitVec 128), p ∈ cfg.nat64 → UrlFence.Addr.nat64Ok p = true → ∀ (v : BitVec 32), cfg.allows (UrlFence.Addr.v6 (UrlFence.Addr.nat64Addr p v)) = true ↔ cfg.allows (UrlFence.Addr.v4 v) = true ∧ ∀ (q : UrlFence.Addr.Prefix 128), q ∈ cfg.deny6 → q.contains (UrlFence.Addr.nat64Addr p v) = false
+DEPSHA UrlFence.Addr.nat64_allows_iff 5c1ca2a8fe6b73018086af94d0dc31f182b6e5f5acfa415517e0c27d2311d1e9
+STATEMENT UrlFence.Addr.nat64_denied : ∀ (cfg : UrlFence.Addr.Config) (p : BitVec 128), p ∈ cfg.nat64 → ∀ (v : BitVec 32), cfg.allows (UrlFence.Addr.v4 v) = false → cfg.allows (UrlFence.Addr.v6 (UrlFence.Addr.nat64Addr p v)) = false
+DEPSHA UrlFence.Addr.nat64_denied 7aa6c5ef18fac47f763d7a2165719ba5fa097caa391e4167231b89c522f9183f
+STATEMENT UrlFence.Addr.isatap_denied : ∀ (cfg : UrlFence.Addr.Config) (p : BitVec 128) (u : Bool) (v : BitVec 32), cfg.allows (UrlFence.Addr.v4 v) = false → cfg.allows (UrlFence.Addr.v6 (UrlFence.Addr.isatapAddr p u v)) = false
+DEPSHA UrlFence.Addr.isatap_denied 42f0ef29f38d597045fa2a5d983915811c1b8400fc0efd39f93763ba048c5bb4
+STATEMENT UrlFence.Addr.allows_of_add_deny4 : ∀ (cfg : UrlFence.Addr.Config) (q : UrlFence.Addr.Prefix 32) (a : UrlFence.Addr), { deny4 := q :: cfg.deny4, deny6 := cfg.deny6, nat64 := cfg.nat64 }.allows a = true → cfg.allows a = true
+DEPSHA UrlFence.Addr.allows_of_add_deny4 fdb69830fb78918c2ade913b9cc0c698e2f31f5d493cfaa6df8f968c7e7a2194
+STATEMENT UrlFence.Addr.allows_of_add_deny6 : ∀ (cfg : UrlFence.Addr.Config) (q : UrlFence.Addr.Prefix 128) (a : UrlFence.Addr), { deny4 := cfg.deny4, deny6 := q :: cfg.deny6, nat64 := cfg.nat64 }.allows a = true → cfg.allows a = true
+DEPSHA UrlFence.Addr.allows_of_add_deny6 ff01273ffcacf513e34f41b5b52275a376ab1459f3b2a108294d55e75ac4a80e
