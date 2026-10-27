@@ -152,7 +152,7 @@ and JSON output are ordinary code, covered by tests.
     fixture as its proxy, and while the Python clients run, any address lookup other than for the
     fixture's address and port is refused and fails the run, so nothing leaves the machine. This
     is the proxy path only: a client's direct path is not observed, and there is no Node request
-    view (Node's standard library, 18.19.1 here, has no proxy-aware client).
+    view.
 
   A disagreement fails the run. A client that is not installed is reported as skipped, never as
   agreeing. A client that refuses an accepted URL is listed separately; `--strict` fails on it, and

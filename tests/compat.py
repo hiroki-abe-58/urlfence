@@ -13,7 +13,8 @@ two kinds of observation, reported separately:
     from the URL show up in the request line or in an `Authorization` header.
   * For an https URL the client sends only `CONNECT host:port`: the userinfo, the TLS server name
     and the inner `Host` header would travel inside the tunnel, which the fixture never opens.
-  This exercises the proxy path only: a client's direct path (DNS lookup, TLS) is not observed.
+  This exercises the proxy path only: a client's direct path (DNS lookup, TLS) is not observed,
+  and there is no request view for Node.
 
 A client that is not installed, or lacks what a view needs, is reported as SKIPPED and is never
 counted as agreeing; `--require` turns a skip into a failure. A disagreement always fails the run.
@@ -541,9 +542,7 @@ def main():
         views.append(cr)
     finally:
         fixture.close()
-    views.append(View("whatwg", "request").skip(f"no Node request view (Node's standard library has no "
-                                                f"proxy-aware client; {views[0].version} here)",
-                                                status="not covered"))
+    views.append(View("whatwg", "request").skip("this harness has no Node request view", status="not covered"))
     if guard.blocked:
         print(f"  a client tried to reach {len(guard.blocked)} addresses other than the fixture, e.g. "
               f"{guard.blocked[:3]}")
