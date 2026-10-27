@@ -11,10 +11,11 @@ import UrlFence.Addr.Registry
   groups may be written as a dotted quad in the IPv4 form above (`::ffff:192.0.2.1`). Zone IDs
   (`%eth0`), brackets, prefix lengths (`/64`), spaces and anything else are refused.
 
-`render` prints the RFC 5952 form: lowercase hex, no leading zeros in a group, and the first longest
-run of two or more zero groups replaced by `::`. It does not use the mixed form of RFC 5952,
-section 5 for IPv4-mapped addresses: `::ffff:192.0.2.1` prints as `::ffff:c000:201`. Parsing a
-printed address gives the address back (`parse_render`).
+`render` prints the form of RFC 5952, section 4: lowercase hex, no leading zeros in a group
+(`hex16_canonical`), and the first longest run of two or more zero groups replaced by `::`
+(`render6_canonical`). It does not use the mixed form that RFC 5952, section 5 recommends for
+IPv4-mapped addresses: `::ffff:192.0.2.1` prints as `::ffff:c000:201`. Parsing a printed address
+gives the address back (`parse_render`).
 -/
 
 namespace UrlFence.Addr
@@ -425,6 +426,170 @@ theorem colon_mem_render6 (a : BitVec 128) : ':' ∈ render6 a := by
     | x :: y :: rest, _ =>
       show ':' ∈ hex16 x ++ ':' :: join ':' ((y :: rest).map hex16)
       simp
+
+/-! ## The printed form is that of RFC 5952
+
+RFC 5952, section 4: hex digits in lowercase, no leading zeros in a group (`hex16_canonical`), and
+`::` for the longest run of zero groups, the first if there are several, never for a single group
+(`render6_canonical`). `zeroRun` only looks at which groups are zero, so it is checked on the 256
+patterns of zero and non-zero groups (`canonical_patterns`). -/
+
+/-- `n` zero groups from index `i`. -/
+def ZeroRun (gs : List Nat) (i n : Nat) : Prop :=
+  i + n ≤ gs.length ∧ (gs.drop i).take n = List.replicate n 0
+
+instance (gs : List Nat) (i n : Nat) : Decidable (ZeroRun gs i n) :=
+  inferInstanceAs (Decidable (_ ∧ _))
+
+/-- The lists of `k` zeros and ones. -/
+def patterns : Nat → List (List Nat)
+  | 0 => [[]]
+  | k + 1 => (patterns k).flatMap fun l => [0 :: l, 1 :: l]
+
+/-- 0 for a zero group, 1 otherwise. -/
+def zeroOne (g : Nat) : Nat := if g = 0 then 0 else 1
+
+theorem mem_patterns (l : List Nat) (h : ∀ x ∈ l, x = 0 ∨ x = 1) : l ∈ patterns l.length := by
+  induction l with
+  | nil => simp [patterns]
+  | cons x l ih =>
+    simp only [List.length_cons, patterns, List.mem_flatMap]
+    refine ⟨l, ih (fun y hy => h y (by simp [hy])), ?_⟩
+    rcases h x (by simp) with rfl | rfl <;> simp
+
+theorem zeroRunAux_zeroOne (gs : List Nat) (i cur : Nat) (best : Nat × Nat) :
+    zeroRunAux (gs.map zeroOne) i cur best = zeroRunAux gs i cur best := by
+  induction gs generalizing i cur best with
+  | nil => rfl
+  | cons g gs ih =>
+    simp only [List.map_cons, zeroRunAux, zeroOne]
+    by_cases hg : g = 0 <;> simp [hg, ih]
+
+theorem zeroRun_iff_zeroOne (gs : List Nat) (i n : Nat) :
+    ZeroRun (gs.map zeroOne) i n ↔ ZeroRun gs i n := by
+  unfold ZeroRun
+  rw [List.length_map, ← List.map_drop, ← List.map_take, List.eq_replicate_iff, List.eq_replicate_iff,
+    List.length_map]
+  constructor
+  · rintro ⟨h1, h2, h3⟩
+    refine ⟨h1, h2, fun b hb => ?_⟩
+    have := h3 (zeroOne b) (List.mem_map.mpr ⟨b, hb, rfl⟩)
+    unfold zeroOne at this
+    split at this <;> simp_all
+  · rintro ⟨h1, h2, h3⟩
+    refine ⟨h1, h2, fun b hb => ?_⟩
+    obtain ⟨g, hg, rfl⟩ := List.mem_map.mp hb
+    simp [zeroOne, h3 g hg]
+
+theorem canonical_patterns : ∀ l ∈ patterns 8,
+    (2 ≤ (zeroRun l).2 → ZeroRun l (zeroRun l).1 (zeroRun l).2 ∧
+      (∀ j, j < 9 → ∀ m, m < 9 → ZeroRun l j m → m ≤ (zeroRun l).2) ∧
+      ∀ j, j < (zeroRun l).1 → ¬ZeroRun l j (zeroRun l).2) ∧
+    ((zeroRun l).2 < 2 → ∀ j, j < 9 → ¬ZeroRun l j 2) := by
+  decide +kernel
+
+/-- For eight groups, `zeroRun` finds the first longest run of zero groups if it has two or more
+groups, and otherwise there is no such run. -/
+theorem zeroRun_canonical (gs : List Nat) (h : gs.length = 8) :
+    (2 ≤ (zeroRun gs).2 → ZeroRun gs (zeroRun gs).1 (zeroRun gs).2 ∧
+      (∀ j m, ZeroRun gs j m → m ≤ (zeroRun gs).2) ∧
+      ∀ j, j < (zeroRun gs).1 → ¬ZeroRun gs j (zeroRun gs).2) ∧
+    ((zeroRun gs).2 < 2 → ∀ j, ¬ZeroRun gs j 2) := by
+  have hp : gs.map zeroOne ∈ patterns 8 := by
+    have := mem_patterns (gs.map zeroOne) (by
+      intro x hx
+      obtain ⟨g, -, rfl⟩ := List.mem_map.mp hx
+      unfold zeroOne
+      split <;> simp)
+    rwa [List.length_map, h] at this
+  have hc := canonical_patterns _ hp
+  rw [show zeroRun (gs.map zeroOne) = zeroRun gs from zeroRunAux_zeroOne gs 0 0 (0, 0)] at hc
+  simp only [zeroRun_iff_zeroOne] at hc
+  obtain ⟨h1, h2⟩ := hc
+  refine ⟨fun hn => ?_, fun hn j hj => h2 hn j ?_ hj⟩
+  · obtain ⟨hr, hmax, hfirst⟩ := h1 hn
+    refine ⟨hr, fun j m hjm => hmax j ?_ m ?_ hjm, hfirst⟩
+    · have := hjm.1
+      omega
+    · have := hjm.1
+      omega
+  · have := hj.1
+    omega
+
+/-- `render6` replaces the first longest run of two or more zero groups with `::`, and prints all
+eight groups if there is no such run. -/
+theorem render6_canonical (a : BitVec 128) :
+    (∃ i n, 2 ≤ n ∧ ZeroRun (toGroups a) i n ∧ (∀ j m, ZeroRun (toGroups a) j m → m ≤ n) ∧
+      (∀ j, j < i → ¬ZeroRun (toGroups a) j n) ∧
+      render6 a = join ':' (((toGroups a).take i).map hex16) ++ ':' :: ':' ::
+        join ':' (((toGroups a).drop (i + n)).map hex16)) ∨
+    ((∀ j, ¬ZeroRun (toGroups a) j 2) ∧ render6 a = join ':' ((toGroups a).map hex16)) := by
+  obtain ⟨hlen, -, -⟩ := toGroups_spec a
+  obtain ⟨h1, h2⟩ := zeroRun_canonical (toGroups a) hlen
+  unfold render6
+  dsimp only
+  by_cases hn : 2 ≤ (zeroRun (toGroups a)).2
+  · obtain ⟨hr, hmax, hfirst⟩ := h1 hn
+    have hle := hr.1
+    left
+    refine ⟨_, _, hn, hr, hmax, hfirst, ?_⟩
+    rw [ite_eq_left ⟨hn, by omega, hr.2⟩]
+  · right
+    refine ⟨h2 (by omega), ?_⟩
+    rw [ite_eq_right (fun h => hn h.1)]
+
+theorem digits_head? (b k n : Nat) : (digits b (k + 1) n).head? = some (n / b ^ k % b) := by
+  induction k generalizing n with
+  | zero => simp [digits]
+  | succ k ih =>
+    rw [digits, List.head?_append, ih, Nat.div_div_eq_div_mul, ← Nat.pow_succ']
+    rfl
+
+theorem hexChar_lower : ∀ d, d < 16 →
+    (isDigit (hexChar d) = true ∨ ('a' ≤ hexChar d ∧ hexChar d ≤ 'f')) ∧ (hexChar d = '0' → d = 0) := by
+  decide +kernel
+
+/-- A printed group is in lowercase hex, has 1 to 4 digits, and starts with `0` only if it is `0`. -/
+theorem hex16_canonical (n : Nat) (h : n < 65536) :
+    (∀ c ∈ hex16 n, isDigit c = true ∨ ('a' ≤ c ∧ c ≤ 'f')) ∧ 0 < (hex16 n).length ∧
+      (hex16 n).length ≤ 4 ∧ (hex16 n = ['0'] ∨ (hex16 n).head? ≠ some '0') := by
+  obtain ⟨h0, h4, -⟩ := hexLen_spec n h
+  have hd := digits_lt 16 (hexLen n) n (by decide)
+  have hlen : (hex16 n).length = hexLen n := by simp [hex16, digits_length]
+  refine ⟨?_, by omega, by omega, ?_⟩
+  · intro c hc
+    simp only [hex16, List.mem_map] at hc
+    obtain ⟨d, hd', rfl⟩ := hc
+    exact (hexChar_lower d (hd d hd')).1
+  · by_cases hn0 : n = 0
+    · subst hn0
+      exact Or.inl (by decide)
+    · right
+      obtain ⟨k, hk⟩ : ∃ k, hexLen n = k + 1 := ⟨hexLen n - 1, by omega⟩
+      have hdig : n / 16 ^ k % 16 ≠ 0 := by
+        unfold hexLen at hk
+        by_cases h1 : n < 16
+        · simp only [h1, ↓reduceIte] at hk
+          obtain rfl : k = 0 := by omega
+          simp only [Nat.pow_zero, Nat.div_one]
+          omega
+        · by_cases h2 : n < 256
+          · simp only [h1, h2, ↓reduceIte] at hk
+            obtain rfl : k = 1 := by omega
+            simp only [Nat.pow_one]
+            omega
+          · by_cases h3 : n < 4096
+            · simp only [h1, h2, h3, ↓reduceIte] at hk
+              obtain rfl : k = 2 := by omega
+              show n / 256 % 16 ≠ 0
+              omega
+            · simp only [h1, h2, h3, ↓reduceIte] at hk
+              obtain rfl : k = 3 := by omega
+              show n / 4096 % 16 ≠ 0
+              omega
+      simp only [hex16, hk, List.head?_map, digits_head?, Option.map_some, ne_eq, Option.some.injEq]
+      intro hz
+      exact hdig ((hexChar_lower _ (Nat.mod_lt _ (by decide))).2 hz)
 
 /-! ## Both families -/
 
