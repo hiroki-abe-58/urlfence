@@ -149,7 +149,9 @@ should reach.
 reachable. Anything else, such as the RFC 8215 local-use prefix `64:ff9b:1::/96`, a ULA or a
 documentation prefix, is a usage error (exit status 2) rather than a prefix that would be silently
 ignored. Configuring NAT64 prefixes allows nothing beyond `64:ff9b::/96` with an allowed IPv4 address
-inside, or what is allowed without them (`allows_nat64_wellKnown`).
+inside, or what is allowed without them (`allows_nat64_wellKnown`). In the library, a configured
+prefix that is not honoured is ignored, and with the current tables all its addresses are denied
+(or, in `::ffff:0:0/96`, decided as IPv4-mapped); that holds for these tables but is not a theorem.
 
 **What is not decoded.** Only IPv4-mapped addresses, the configured /96 NAT64 prefixes and ISATAP
 identifiers are decoded; 6to4 and Teredo are denied. An address inside 2000::/3 that carries an
@@ -207,7 +209,7 @@ For resolved addresses ([`UrlFence/Addr/`](UrlFence/Addr), namespace `UrlFence.A
 | `explain_eq_none_iff` | A denial reason exists **iff** the address is denied. |
 | `parse_render`, `render6_canonical`, `hex16_canonical` | A printed address parses back to itself, and the IPv6 form is that of RFC 5952, section 4. |
 | `parse4_eq_some_iff`, `parse4_isSome_iff` | An IPv4 text is read as `v` **iff** it is the printed form of `v`, and is accepted **iff** the URL host parser reads it as an IPv4 address. |
-| `Prefix.contains_iff_getMsbD`, `Prefix.contains_iff`, `contains_iff_range4`, `contains_iff_range6`, `ipv4Registry_blocks`, `ipv6Registry_blocks` | Prefix membership is equality of the first bits; every registry block is a CIDR block, so membership is a range of addresses. The last two pin the registry tables. |
+| `Prefix.contains_iff_getMsbD`, `Prefix.contains_iff`, `contains_iff_range4`, `contains_iff_range6`, `ipv4Registry_blocks`, `ipv6Registry_blocks` | Prefix membership is equality of the first bits; every registry block is a CIDR block, so membership is a range of addresses. The audit pins of the last two cover the registry tables. |
 | `parsePrefix_v4`, `parsePrefix_v6` | A parsed `--deny` or `--nat64` prefix is a CIDR block. |
 
 ### Where the proofs end
@@ -321,15 +323,18 @@ and JSON output are ordinary code, covered by tests.
     both and print as `ipaddress` prints it; every refused string must be refused by `inet_pton`
     too (`ipaddress` also accepts zone IDs). With Python 3.12.3: 25,889 accepted, 24,111 refused
     (counted by category: zone IDs, brackets, IPv4 not in four parts, leading zeros, …), no
-    difference;
+    difference. This needs glibc's `inet_pton` (Linux) and Python 3.9.5 or later;
   * its decisions against `ipaddress.is_global` on 333 addresses: the edges of every registry block,
     of 2000::/3 and of 224.0.0.0/4, and the mapped, IPv4-compatible, NAT64, 6to4, Teredo, ISATAP and
     site-local forms of nine IPv4 addresses. Every difference must match an entry of a list with
     its reason, all of them addresses URLFence denies and `is_global` calls global: the blocks
-    denied as a whole above, the rows Python 3.12.3 does not know yet (3fff::/20, 5f00::/16,
-    100:0:0:1::/64), multicast, space outside 2000::/3, ISATAP, and mapped addresses of IPv4
-    addresses that are not private but not globally reachable either (100.64.0.0/10). There are
-    105; `python3 tests/test_addr.py --table` prints them;
+    denied as a whole above, registry rows the running Python's table does not list (3.12.3 lacks
+    3fff::/20, 5f00::/16 and 100:0:0:1::/64; versions before the CVE-2024-4032 update also lack
+    2002::/16), multicast, space outside 2000::/3, ISATAP, and mapped addresses of IPv4 addresses
+    that are not private but not globally reachable either (100.64.0.0/10). How many there are
+    depends on the Python version, whose table changes between releases: 105 with Python 3.12.3
+    (Ubuntu), 100 with 3.10.20, 3.12.13 and 3.13.14, 120 with 3.11.9.
+    `python3 tests/test_addr.py --table` prints them;
   * the CLI's contract: fields, exit status, reasons, NAT64 and prefix usage errors, stdin
     encoding and ASCII output.
 * `tests/test_guarded_fetch.py` runs the example against the real binary. Unpinned, an HTTP proxy on
@@ -426,7 +431,9 @@ build a `UrlFence.Addr.Config` and call `Config.checkString`.
   loopback address, or change between the check and the connection (rebinding): check every
   resolved address with `urlfence addr` and pin the connection to a checked one, as the example
   does. An unpinned connection (one that resolves the name again, or goes through a proxy) is not
-  covered.
+  covered: a client that resolves the name itself, such as a browser, curl, requests or urllib, or
+  any client with Happy Eyeballs, connects to whatever its own lookup returns, not to an address
+  you checked, unless you hand it that address.
 * **Addresses the registries cannot tell apart.** `urlfence addr` knows the IANA special-purpose
   blocks, not your network: internal services on global addresses (a cloud provider's host
   endpoints, your own public ranges) are allowed unless you `--deny` them, and so are IPv4
@@ -447,9 +454,10 @@ build a `UrlFence.Addr.Config` and call `Config.checkString`.
 * **Ports and paths.** They are reported, but patterns do not restrict them.
 * **Passing the URL on.** Hand the URL to the client as a single argument, never through a shell. The
   path may contain shell metacharacters and curl glob characters (`[`, `{`), so use `curl -g`.
-* **CLI input.** A stdin line ending in `\r` (CRLF) is refused as `chars`. An argument that is not
-  valid UTF-8 reaches the program with U+FFFD and is refused as `chars`; only stdin reports the bytes
-  (`input_hex`).
+* **CLI input.** A stdin line ending in `\r` (CRLF) is refused as `chars` (as `parse` by `addr`). An
+  argument that is not valid UTF-8 is decoded lossily: it reaches the program with U+FFFD and is
+  refused as `chars` (as `parse` by `addr`); only stdin reports the bytes (`input_hex`, reason
+  `encoding`).
 
 ## Related work
 

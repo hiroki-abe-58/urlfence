@@ -18,8 +18,9 @@ internal address. `Config.check` decides whether a resolved address may be conne
   (`Config.nat64`, for example the well-known `64:ff9b::/96`). Such an address gets the decision of
   the IPv4 address it carries. A configured NAT64 prefix is honoured only if it is `64:ff9b::/96`,
   or a /96 inside 2000::/3 that has no address in common with a row that is not globally reachable
-  (`nat64Ok`). Other configured prefixes are not honoured, and their addresses are denied: they are
-  outside 2000::/3 or in such a row (in `::ffff:0:0/96` they are decided as IPv4-mapped). The
+  (`nat64Ok`). Other configured prefixes are not honoured, and with the current tables their
+  addresses are denied: they are outside 2000::/3 or in such a row (in `::ffff:0:0/96` they are
+  decided as IPv4-mapped). That follows from the tables and is not a theorem here; the
   command-line tool refuses such a prefix rather than ignoring it.
 * **Other IPv6**: allowed only inside 2000::/3, and denied there if it is in a row of the IPv6
   registry that is not globally reachable (all of 2001::/23 including Teredo, 2001:db8::/32,
@@ -102,8 +103,9 @@ def Config.allows4 (cfg : Config) (v : BitVec 32) : Bool :=
   !unreachable4 v && !multicast4.contains v && !cfg.deny4.any (·.contains v)
 
 /-- A NAT64 prefix is honoured if it is `64:ff9b::/96`, or a /96 inside 2000::/3 that has no address
-in common with a row that is not globally reachable. The addresses of a configured prefix that is
-not honoured are denied (except in `::ffff:0:0/96`, decided as IPv4-mapped). -/
+in common with a row that is not globally reachable. With the current tables, the addresses of a
+configured prefix that is not honoured are denied (except in `::ffff:0:0/96`, decided as
+IPv4-mapped); this is not proven. -/
 def nat64Ok (p : BitVec 128) : Bool :=
   wellKnown96.contains p ||
     (global6.contains p &&

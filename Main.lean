@@ -19,7 +19,9 @@ Each URL is checked with the proven `UrlFence.Policy.check`, and one JSON object
 * The exit status is 0 when at least one URL was checked and every URL is allowed, 1 when any is
   denied or rejected, and 2 for a usage error, including no URLs at all.
 * A stdin line that is not UTF-8 is rejected with reason `encoding` and reported by its bytes
-  (`input_hex`). Any other character outside printable ASCII is rejected with reason `chars`.
+  (`input_hex`). Any other character outside printable ASCII is rejected with reason `chars`. An
+  argument that is not UTF-8 is decoded lossily before this program sees it (U+FFFD for each bad
+  sequence), so it is rejected as `chars`, not `encoding`.
 * The output is ASCII: other characters are written as `\u` escapes.
 
     urlfence addr [--nat64 PREFIX/96 …] [--deny PREFIX …] [--stdin] [-- ADDRESS …]
@@ -37,7 +39,9 @@ decimal), and for a denial the first rule that denies it (`UrlFence.Addr.Config.
   prefixes. `--nat64` takes a /96 that URLFence honours as a NAT64 prefix (`64:ff9b::/96`, or a /96
   inside 2000::/3 outside every registry block that is not globally reachable); any other is a
   usage error rather than a prefix that would be silently ignored.
-* Addresses, stdin, the exit status and the ASCII output are as for `check`.
+* Addresses, stdin, the exit status and the ASCII output are as for `check`; a rejected address has
+  reason `parse` (an argument that is not UTF-8 too, decoded lossily as above), or `encoding` for a
+  stdin line that is not UTF-8.
 
 This file only parses arguments and prints results; the decisions come from the library.
 -/
