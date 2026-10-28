@@ -17,8 +17,9 @@ Status: v0.1.0, experimental.
 > form of `http(s)` URLs and refuses everything else, including many URLs a browser would accept.
 > `urlfence check` does not resolve DNS, so a name it allows can still point to an internal address
 > (DNS rebinding): check each resolved address with `urlfence addr` and connect only to a checked
-> one, as [`examples/guarded_fetch.py`](examples/guarded_fetch.py) does. It does not follow
-> redirects either: check every hop, not only the first URL. See
+> one, as [`examples/guarded_fetch.py`](examples/guarded_fetch.py) and, for Node,
+> [`examples/guarded_fetch.mjs`](examples/guarded_fetch.mjs) do. It does not follow redirects
+> either: check every hop, not only the first URL. See
 > [What it does not cover](#what-it-does-not-cover).
 
 ## Why
@@ -174,8 +175,8 @@ reachable is allowed until they are updated ([`data/README.md`](data/README.md))
 **Together with the URL check.** Check the URL with `urlfence check`, resolve its host, check every
 address with `urlfence addr`, refuse if any is denied, and connect to a checked address without
 resolving the name again, keeping the URL's host for the `Host` header and the TLS server name. Do
-it again on every redirect. [`examples/guarded_fetch.py`](examples/guarded_fetch.py) does this by
-default (see [Usage](#usage)).
+it again on every redirect. [`examples/guarded_fetch.py`](examples/guarded_fetch.py) and
+[`examples/guarded_fetch.mjs`](examples/guarded_fetch.mjs) do this by default (see [Usage](#usage)).
 
 ## What is proven
 
@@ -353,14 +354,31 @@ and JSON output are ordinary code, covered by tests.
   that turns from public to loopback is refused on the next hop; the request keeps the URL's host
   in `Host` and, for https, as the TLS server name. Unusable answers from the binary, simulated by
   replacing `subprocess.run`, refuse.
-* `tests/mutants.py` plants 23 plausible bugs, one at a time, and requires each one to be caught.
+* `tests/test_guarded_fetch_node.py` runs the Node example the same way, under node, through
+  [`tests/guarded_fetch_node.mjs`](tests/guarded_fetch_node.mjs): there every `net.Socket` connect
+  call is recorded with the host and port the example gave it and sent to a fixture on 127.0.0.1
+  instead, `dns.lookup` refuses (and must not be called), and the resolver answers from a table
+  (in one test, throwing on any lookup beyond one per hop). It covers the pinned cases above, the
+  request target, a redirect to another allowed host whose address is denied, an answer whose
+  `addr` is not the address checked, the environment proxies, `pin: false`, and the example's
+  `openSocket` against a listener (numeric addresses only, with and without `autoSelectFamily`).
+  With openssl, https
+  fixtures with throwaway self-signed certificates check that the certificate must match the
+  URL's host, not the address connected to. Unusable answers come from a stand-in binary
+  (`URLFENCE_BIN`). Skipped without node or openssl, unless `URLFENCE_REQUIRE` names them, as CI
+  and `scripts/reproduce.sh` do.
+* `tests/mutants.py` plants 26 plausible bugs, one at a time, and requires each one to be caught.
   They include the CVE-style prefix and suffix mistakes, a wrong authority boundary, accepting
   octal IPv4 parts, and for addresses: no IPv4-mapped decoding, the IPv4 address taken at the wrong
   offset, the 6to4 row dropped, a prefix length off by one, the ISATAP `0200:5efe` form missed,
   multicast allowed, `64:ff9b::/96` treated as global, and the CLI ignoring a NAT64 prefix that
-  URLFence would not honour. So far every one but the last fails the build, and the script names
-  the file: a theorem or a build-time example; the last fails `tests/test_addr.py`. Some fail only
-  because a proof script no longer fits the changed code, not because a statement became false.
+  URLFence would not honour; and in the Node example: addresses not checked again after a
+  redirect, a connection to the host name instead of the checked address, and an answer's `addr`
+  not compared with the address checked. So far every one in the library fails the build, and the
+  script names the file: a theorem or a build-time example; the one in the CLI fails
+  `tests/test_addr.py`, and the three in the Node example fail `tests/test_guarded_fetch_node.py`.
+  Some fail only because a proof script no longer fits the changed code, not because a statement
+  became false.
   Dropping the userinfo check or the percent check changes only the reason for a rejection, since
   the host grammar refuses those characters anyway. Dropping the backslash check also lets a
   backslash through in the path, query or fragment, with the host unchanged.
@@ -368,7 +386,7 @@ and JSON output are ordinary code, covered by tests.
 [`scripts/reproduce.sh`](scripts/reproduce.sh) runs all of this from a fresh clone of the current
 commit in a temporary directory: the pins, the build, the audit, the registry check, the tests, the
 client comparison on the full corpus and the mutation check, and prints the binary's SHA-256. It
-takes about two and a half minutes, and, like CI, fails if node or curl is missing.
+takes about two and a half minutes, and, like CI, fails if node, curl or openssl is missing.
 
 ## Usage
 
@@ -427,6 +445,39 @@ It does nothing about the port or the path, or what a proxy or the server does w
 each socket operation, not to the whole fetch: a server that sends slowly can hold a fetch for much
 longer than `TIMEOUT`.
 
+[`examples/guarded_fetch.mjs`](examples/guarded_fetch.mjs) is the same example for Node 18 and
+later (ESM, no dependencies), with the same rules: `await guardedFetch(url, { allow: [...] })`
+gives `{ status, body, hops }` or rejects with `Refused`, and
+`node examples/guarded_fetch.mjs --allow PATTERN -- URL` runs it from a shell. Its
+header lists where it differs from the Python one; mainly, a `Location` is resolved as WHATWG
+resolves it, so the next URL is normalised (a host in uppercase becomes lowercase) before it is
+checked. Pinned (the default), on every hop it resolves the host once (`dns.promises.lookup`, or
+the `resolve` option), runs `urlfence addr` on every answer (`denyAddr`, `nat64`), refuses unless
+each answer is allowed and its `addr` is the address checked (compared as numbers), and opens the
+connection itself: `net.connect` or `tls.connect` with that address as `host`, for which Node's
+`net` skips the lookup, and Happy Eyeballs (`autoSelectFamily`) with it; the example also passes a
+`lookup` that refuses. The request then goes over that socket, with no Agent. For https the server
+name is the URL's host (none for an IPv4 host) and the certificate is checked against the URL's
+host, not the address: the example calls `checkServerIdentity` with it. Certificates are verified
+even under `NODE_TLS_REJECT_UNAUTHORIZED=0`; `tls` passes on a few options such as `ca`.
+
+Proxies: Node 18's `http` and `https` take no proxy from the environment. Node 24.13.0 (its
+source read and its agents tried by hand; not in the tests) gives its two global agents a proxy
+from `HTTP_PROXY` and `HTTPS_PROXY` (and `NO_PROXY`) when `NODE_USE_ENV_PROXY=1` or
+`--use-env-proxy` is set, and `fetch()` one too; agents that code creates, and requests without an
+agent, connect directly. Other versions were not examined. While pinning, the example refuses
+when that support may be on (`NODE_USE_ENV_PROXY` set to anything but `0`, `--use-env-proxy` in
+the arguments or `NODE_OPTIONS`, or a global agent with a proxy configuration) and a proxy is set
+for the scheme; it does not read `NO_PROXY`. With `pin: false`, `http(s).request` with the `agent` given (or the
+global agent, and any proxy it uses) resolves the name itself, and no address is checked; with
+`pin: true`, an `agent` is an error.
+
+Its limits are the Python one's, and: `fetch()` (undici) is neither used nor pinned, so a request
+made with it is not covered; code that patches `http` or `net` is not guarded against, beyond the
+request having to use the example's socket; `timeout` (10 s by default) bounds each `urlfence` run
+and each period with no socket activity, not the whole fetch; and the body is cut at `maxBytes`
+without saying whether it was cut, as in Python.
+
 From Lean, build a policy with `UrlFence.Policy.make` and call `Policy.checkString`; for addresses,
 build a `UrlFence.Addr.Config` and call `Config.checkString`.
 
@@ -434,8 +485,8 @@ build a `UrlFence.Addr.Config` and call `Config.checkString`.
 
 * **DNS.** `urlfence check` decides on the name only. An allowed name can resolve to a private or
   loopback address, or change between the check and the connection (rebinding): check every
-  resolved address with `urlfence addr` and pin the connection to a checked one, as the example
-  does. An unpinned connection (one that resolves the name again, or goes through a proxy) is not
+  resolved address with `urlfence addr` and pin the connection to a checked one, as the examples
+  do. An unpinned connection (one that resolves the name again, or goes through a proxy) is not
   covered: a client that resolves the name itself, such as a browser, curl, requests or urllib, or
   any client with Happy Eyeballs, connects to whatever its own lookup returns, not to an address
   you checked, unless you hand it that address.
@@ -447,7 +498,7 @@ build a `UrlFence.Addr.Config` and call `Config.checkString`.
   a proxy then does with an address is outside its view. The registry tables need re-transcription
   when IANA updates them.
 * **Other protocols.** The address check is for TCP connections made by the caller; UDP and QUIC
-  are not pinned by the example, and neither are ports.
+  are not pinned by the examples, and neither are ports.
 * **Redirects.** A request to an allowed URL can be redirected anywhere. Re-check every hop, or
   turn redirects off.
 * **What the server does.** Open redirects and proxies on an allowed host are out of scope.
