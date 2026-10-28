@@ -4,8 +4,6 @@
 //     import { guardedFetch } from "./guarded_fetch.mjs";
 //     const { status, body, hops } = await guardedFetch("https://docs.python.org/3/", { allow: ["docs.python.org"] });
 //
-//     node examples/guarded_fetch.mjs --allow docs.python.org -- https://docs.python.org/3/
-//
 // An example to adapt, not a hardened HTTP client. Node 18 or later, no dependencies.
 //
 // 1. `urlfence check` decides on the URL (execFile, no shell, with a timeout). Its answer is used
@@ -21,12 +19,13 @@
 //    `net.connect` or `tls.connect` with that address as `host`, for which Node does no lookup, and
 //    a `lookup` that refuses in case it ever did), with no Agent. The `Host` header, the TLS server
 //    name and the name the certificate must match are the URL's host. A proxy resolves the name
-//    itself, so nothing could be pinned: with `pin: true`, passing `agent` is an error, and a proxy
-//    set in the environment for the URL's scheme refuses while Node's own proxy support is on
-//    (`NODE_USE_ENV_PROXY`, `--use-env-proxy`; Node 18 has none). `NO_PROXY` is not consulted.
-//    With `pin: false`, Node's http(s).request (with `agent`, or the global agent and any proxy it
-//    uses) resolves the name again, and no address is checked; a proxy must then enforce its own
-//    address policy.
+//    itself, so nothing could be pinned: with `pin: true`, passing `agent` is an error. Pinned
+//    requests never use an Agent, so no proxy can take them over; still, so that a configured
+//    proxy is not silently bypassed, a proxy set in the environment for the URL's scheme refuses
+//    while Node's own proxy support is on (`NODE_USE_ENV_PROXY`, `--use-env-proxy`; Node 18 has
+//    none). `NO_PROXY` is not consulted. With `pin: false`, Node's http(s).request (with `agent`,
+//    or the global agent and any proxy it uses) resolves the name again, and no address is
+//    checked; a proxy must then enforce its own address policy.
 // 3. The request (GET) is for exactly the URL that was checked: in both modes the request target
 //    is the checked URL after its host and port, without the fragment.
 // 4. Redirects are never followed by Node: each `Location` is resolved against the current URL
@@ -43,37 +42,44 @@
 // the request, only TCP is pinned, and `fetch()` (undici) is not used or pinned. See the README.
 //
 // Deliberate differences from guarded_fetch.py:
-// * `Location` is resolved as WHATWG does, not as urljoin: the next URL is normalised (a host in
-//   uppercase becomes lowercase, a space in the path becomes %20) before it is checked, and that
-//   normalised string is what is checked and requested.
+// * `Location` is resolved as WHATWG does, not as urljoin, and the result is normalised before
+//   it is checked: the host is percent-decoded and lowercased (`DOCS%2Eexample.com` becomes
+//   `docs.example.com`), tabs and newlines are removed, backslashes become slashes, dot segments
+//   (also `%2e%2e`) and a default port are dropped, IPv4 number forms are made canonical (`0x7f.1`
+//   becomes `127.0.0.1`), and a space in the path becomes `%20`. guarded_fetch.py would check the
+//   raw string, and URLFence refuses most of these forms. This is not a way around the check: the
+//   normalised string is what is checked, address included, and requested, exactly, and a server
+//   could just as well have sent that string.
 // * Unpinned, the request is built from URLFence's reading and the checked string, as pinned,
 //   rather than by handing the URL to the library (Node would parse it again and normalise the
 //   path); `agent` takes the place of `proxies`.
 // * The environment refuses only when Node's own proxy support may be on, since Node's http
 //   ignores HTTP_PROXY otherwise; NO_PROXY is not consulted, and ALL_PROXY, which Node does not
 //   use, is not considered.
-// * `tls` (a few tls.connect options, such as `ca`) takes the place of an SSLContext. Certificates
-//   are verified unless `tls.rejectUnauthorized` is false; NODE_TLS_REJECT_UNAUTHORIZED is ignored.
-// * Stricter checks: lists must be arrays of strings; URLFence's reading must be followed by `/`,
-//   `?`, `#` or the end, with a port from 1 to 65535; an answer's `addr` must be a string; the
-//   pinned request must be on the connection guardedFetch opened (in case code patches `http`).
-// * `timeout` and `resolve` are options, the result is an object, and there is a command line.
+// * `tls` (CA, client certificate, cipher and version options) takes the place of an SSLContext;
+//   options that could turn verification off are refused. Certificates are verified, against the
+//   URL's host, whatever NODE_TLS_REJECT_UNAUTHORIZED says. With `pin: false` the `tls` options go
+//   to https.request with `rejectUnauthorized: true`, but the options of an `agent` passed in
+//   override them there (an agent made with `rejectUnauthorized: false` does not verify).
+// * Stricter checks: lists must be arrays of strings; `timeout` must be at least 1 ms (Node takes
+//   0 as no timeout); URLFence's reading must be followed by `/`, `?`, `#` or the end, with a port
+//   from 1 to 65535; an answer's `addr` must be a string; the pinned request must be on the
+//   connection guardedFetch opened (in case code patches `http`).
+// * `timeout` and `resolve` are options, and the result is an object.
 import { execFile } from "node:child_process";
 import dns from "node:dns";
-import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 import tls from "node:tls";
-import { fileURLToPath } from "node:url";
 
 export const URLFENCE = process.env.URLFENCE_BIN ?? "urlfence";
 export const TIMEOUT = 10000;
 const DECISIONS = ["allow", "deny", "reject"];
 const REDIRECTS = [301, 302, 303, 307, 308];
-// What `tls` may set for pinned https; the address, port, server name and lookup are guardedFetch's.
-const TLS_KEYS = ["ca", "cert", "key", "pfx", "passphrase", "ciphers", "minVersion", "maxVersion", "secureContext",
-  "rejectUnauthorized", "checkServerIdentity"];
+// What `tls` may set for https. Nothing here can turn verification off; the address, port, server
+// name, lookup and certificate checks are guardedFetch's.
+const TLS_KEYS = ["ca", "cert", "key", "pfx", "passphrase", "ciphers", "minVersion", "maxVersion", "secureContext"];
 
 export class Refused extends Error {
   // URLFence did not allow a URL or an address on the way (`hops` lists every check), or a request failed.
@@ -92,6 +98,11 @@ function strings(lists) {
   }
 }
 
+// Node takes a timeout of 0 as none at all.
+function millis(timeout) {
+  if (!Number.isSafeInteger(timeout) || timeout < 1) throw new TypeError("timeout must be an integer, at least 1 ms");
+}
+
 // Run urlfence: {code, stdout (ASCII; any other byte becomes U+FFFD), stderr}, or {error}.
 function run(args, timeout) {
   return new Promise((resolve) => {
@@ -102,7 +113,7 @@ function run(args, timeout) {
           if (err && typeof err.code !== "number") {
             resolve({ error: err.killed ? `no answer within ${timeout} ms` : err.message });
           } else {
-            resolve({ code: err ? err.code : 0, stdout: stdout.toString("latin1").replace(/[\x80-\xff]/g, "�"),
+            resolve({ code: err ? err.code : 0, stdout: stdout.toString("latin1").replace(/[\x80-\xff]/g, "\ufffd"),
               stderr: stderr.toString("utf8") });
           }
         });
@@ -127,6 +138,7 @@ function parse(line) {
 // URLFence's answer for one URL, as an object; a `reject` whenever the answer is unusable.
 export async function check(url, { allow, deny = [], schemes = ["https"], timeout = TIMEOUT } = {}) {
   strings({ allow, deny, schemes });
+  millis(timeout);
   if (typeof url !== "string") return { decision: "reject", reason: "urlfence did not run: the URL is not a string" };
   const args = ["check"];
   for (const a of allow) args.push("--allow", a);
@@ -153,6 +165,7 @@ export async function check(url, { allow, deny = [], schemes = ["https"], timeou
 // reason} when there is no usable answer.
 export async function checkAddrs(addrs, { deny = [], nat64 = [], timeout = TIMEOUT } = {}) {
   strings({ deny, nat64 });
+  millis(timeout);
   const args = ["addr"];
   for (const d of deny) args.push("--deny", d);
   for (const n of nat64) args.push("--nat64", n);
@@ -203,12 +216,13 @@ function noLookup(host, options, callback) {
 // address in numeric form (a name, a scoped address) is a TypeError, so nothing is resolved here.
 export function openSocket(addr, port, { host = null, tlsOptions = {}, timeout = TIMEOUT } = {}) {
   if (addrKey(addr) === null) throw new TypeError(`not a numeric address: ${JSON.stringify(addr)}`);
+  millis(timeout);
   const where = { host: addr, port, lookup: noLookup, timeout };
   return new Promise((resolve, reject) => {
     const s = host === null ? net.connect(where) : tls.connect({
-      rejectUnauthorized: true, ...tlsOptions, ...where, path: undefined, socket: undefined,
+      ...tlsOptions, ...where, path: undefined, socket: undefined, rejectUnauthorized: true,
       servername: net.isIP(host) ? undefined : host, // RFC 6066: no server name for an address
-      checkServerIdentity: (_, cert) => (tlsOptions.checkServerIdentity ?? tls.checkServerIdentity)(host, cert),
+      checkServerIdentity: (_, cert) => tls.checkServerIdentity(host, cert),
     });
     s.on("timeout", () => s.destroy(new Error(`no activity for ${timeout} ms`)));
     s.on("error", () => {}); // after the connection, errors reach the request
@@ -346,19 +360,21 @@ async function pinnedGet(url, r, hop, hops, o) {
 }
 
 // GET `url` with Node's http(s).request and `o.agent` (or the global agent): Node resolves the name.
+// The agent's own options override these (its `rejectUnauthorized`, say).
 async function unpinnedGet(url, r, hops, o) {
   const { scheme, host, port, target, headers } = reading(url, r, hops);
   try {
-    return await exchange(scheme === "https" ? https : http, { host, port, method: "GET", path: target, headers,
-      agent: o.agent, timeout: o.timeout, servername: net.isIP(host) ? "" : host }, o.maxBytes);
+    return await exchange(scheme === "https" ? https : http, { ...o.tls, host, port, method: "GET", path: target,
+      headers, agent: o.agent, timeout: o.timeout, servername: net.isIP(host) ? "" : host, rejectUnauthorized: true },
+    o.maxBytes);
   } catch (e) {
     throw new Refused(`request failed: ${e.message}`, hops);
   }
 }
 
 // {status, body, hops} for the last response, or a Refused rejection. `denyAddr` and `nat64` are
-// prefixes for `urlfence addr --deny` and `--nat64`; `tls` holds options for pinned https (`ca`,
-// say); `resolve(host, {all: true})` answers like `dns.promises.lookup`; `agent` is for pin: false.
+// prefixes for `urlfence addr --deny` and `--nat64`; `tls` holds options for https (`ca`, say);
+// `resolve(host, {all: true})` answers like `dns.promises.lookup`; `agent` is for pin: false.
 export async function guardedFetch(url, { allow, deny = [], schemes = ["https"], maxRedirects = 3, agent,
   maxBytes = 1 << 20, pin = true, denyAddr = [], nat64 = [], tls: tlsOptions = {}, timeout = TIMEOUT,
   resolve = (host, options) => dns.promises.lookup(host, options) } = {}) {
@@ -369,9 +385,10 @@ export async function guardedFetch(url, { allow, deny = [], schemes = ["https"],
   for (const k of Object.keys(tlsOptions)) {
     if (!TLS_KEYS.includes(k)) throw new TypeError(`tls.${k} is not an option guardedFetch passes on`);
   }
-  for (const [name, n] of Object.entries({ maxRedirects, maxBytes, timeout })) {
+  for (const [name, n] of Object.entries({ maxRedirects, maxBytes })) {
     if (!Number.isSafeInteger(n) || n < 0) throw new TypeError(`${name} must be a non-negative integer`);
   }
+  millis(timeout);
   const o = { agent, maxBytes, denyAddr, nat64, tls: tlsOptions, timeout, resolve };
   const hops = [];
   for (let i = 0; i <= maxRedirects; i++) {
@@ -395,44 +412,3 @@ export async function guardedFetch(url, { allow, deny = [], schemes = ["https"],
   }
   throw new Refused(`more than ${maxRedirects} redirects`, hops);
 }
-
-// node guarded_fetch.mjs --allow PATTERN ... [--deny PATTERN] [--scheme S] [--deny-addr P] [--nat64 P]
-//   [--no-pin] [--max-bytes N] -- URL: the body on stdout, {status, hops} or {refused, hops} as
-//   JSON on stderr; exit status 0, 1 when refused, 2 for a usage error.
-async function main(argv) {
-  const o = { allow: [], deny: [], schemes: [], denyAddr: [], nat64: [] };
-  const lists = { "--allow": "allow", "--deny": "deny", "--scheme": "schemes", "--deny-addr": "denyAddr",
-    "--nat64": "nat64" };
-  let url = null;
-  for (let i = 0; i < argv.length; i++) {
-    if (lists[argv[i]] && i + 1 < argv.length) o[lists[argv[i]]].push(argv[++i]);
-    else if (argv[i] === "--no-pin") o.pin = false;
-    else if (argv[i] === "--max-bytes" && i + 1 < argv.length) o.maxBytes = Number(argv[++i]);
-    else if (argv[i] === "--" && i + 2 === argv.length) url = argv[++i];
-    else break;
-  }
-  if (url === null || o.allow.length === 0) {
-    process.stderr.write("usage: node guarded_fetch.mjs --allow PATTERN ... [--deny PATTERN ...] [--scheme S ...] "
-      + "[--deny-addr PREFIX ...] [--nat64 PREFIX ...] [--no-pin] [--max-bytes N] -- URL\n");
-    process.exitCode = 2;
-    return;
-  }
-  if (o.schemes.length === 0) delete o.schemes;
-  try {
-    const { status, body, hops } = await guardedFetch(url, o);
-    process.stderr.write(JSON.stringify({ status, hops }) + "\n");
-    process.stdout.write(body);
-  } catch (e) {
-    if (!(e instanceof Refused)) throw e;
-    process.stderr.write(JSON.stringify({ refused: e.message, hops: e.hops }) + "\n");
-    process.exitCode = 1;
-  }
-}
-
-let direct = false;
-try {
-  direct = fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
-} catch {
-  // not run as a script
-}
-if (direct) await main(process.argv.slice(2));

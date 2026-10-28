@@ -2,14 +2,14 @@
 the real `urlfence` binary and nothing leaving the machine.
 
 The tests run `tests/guarded_fetch_node.mjs` under node, which calls the example and reports what it
-did (the last one runs the example's command line). There, every `net.Socket` connect call is
-recorded with the host and port the example gave it, then sent to an origin fixture on 127.0.0.1
-instead (as tests/test_guarded_fetch.py replaces `open_socket`, one level lower, so the example's
-own connection code runs); `dns.lookup` and
+did. There, every `net.Socket` connect call is recorded with the host and port the example gave
+it, then sent to an origin fixture on 127.0.0.1 instead (as tests/test_guarded_fetch.py replaces
+`open_socket`, one level lower, so the example's own connection code runs); `dns.lookup` and
 `dns.promises.lookup` refuse and are recorded, so Node resolves nothing; and the resolver given to
 `guardedFetch` answers from a table (one list per lookup, so an answer can change between hops). The
 answers are public addresses where a fetch should succeed, so URLFence's address policy needs no
-exception for the fixture: only the driver knows that the connection ends on 127.0.0.1.
+exception for the fixture: only the driver knows that the connection ends on 127.0.0.1. The names
+are under `.invalid`, so that none of them could resolve even if something got past the guard.
 
 The origin fixture records what each connection brings first: an HTTP request head, answered from
 PAGES by its Host header and path, or a TLS ClientHello, answered with a fatal alert. With openssl,
@@ -31,12 +31,12 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 
 import compat
-from common import BIN, NODE, ROOT
+from common import BIN, NODE, ROOT, run_check
 
 DRIVER = os.path.join(ROOT, "tests", "guarded_fetch_node.mjs")
-EXAMPLE = os.path.join(ROOT, "examples", "guarded_fetch.mjs")
 OPENSSL = shutil.which("openssl")
 REQUIRED = {t for t in os.environ.get("URLFENCE_REQUIRE", "").split(",") if t}
 # Variables that change what node or the example does; no run inherits them.
@@ -44,21 +44,27 @@ CLEAN = ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "no_proxy", "
          "NODE_USE_ENV_PROXY", "NODE_OPTIONS", "NODE_TLS_REJECT_UNAUTHORIZED", "NODE_EXTRA_CA_CERTS")
 
 PAGES = {
-    ("docs.example.com", "/guide"): (200, {}, b"the guide"),
-    ("docs.example.com", "/moved"): (302, {"Location": "/guide"}, b""),
-    ("docs.example.com", "/relative"): (302, {"Location": "guide"}, b""),
-    ("docs.example.com", "/upper"): (302, {"Location": "http://DOCS.example.com/guide"}, b""),
-    ("docs.example.com", "/sneaky"): (302, {"Location": "http://docs.example.com@evil.example.net/"}, b""),
-    ("docs.example.com", "/loop"): (302, {"Location": "/loop"}, b""),
-    ("docs.example.com", "/broken"): (404, {"Transfer-Encoding": "chunked"}, b"zz\r\n"),
-    ("docs.example.com", "/large"): (200, {}, b"z" * 50_000),
-    ("docs.example.com", "/to-api"): (302, {"Location": "http://api.example.com/data"}, b""),
-    ("api.example.com", "/data"): (200, {}, b"api data"),
+    ("docs.example.invalid", "/guide"): (200, {}, b"the guide"),
+    ("docs.example.invalid", "/moved"): (302, {"Location": "/guide"}, b""),
+    ("docs.example.invalid", "/relative"): (302, {"Location": "guide"}, b""),
+    ("docs.example.invalid", "/upper"): (302, {"Location": "http://DOCS.example.invalid/guide"}, b""),
+    ("docs.example.invalid", "/sneaky"): (302, {"Location": "http://docs.example.invalid@evil.example.invalid/"}, b""),
+    ("docs.example.invalid", "/loop"): (302, {"Location": "/loop"}, b""),
+    ("docs.example.invalid", "/broken"): (404, {"Transfer-Encoding": "chunked"}, b"zz\r\n"),
+    ("docs.example.invalid", "/large"): (200, {}, b"z" * 50_000),
+    ("docs.example.invalid", "/to-api"): (302, {"Location": "http://api.example.invalid/data"}, b""),
+    ("api.example.invalid", "/data"): (200, {}, b"api data"),
     ("8.8.8.8", "/guide"): (200, {}, b"the guide by address"),
 }
 for code in (301, 302, 303, 307, 308):
-    PAGES[("docs.example.com", f"/leave{code}")] = (code, {"Location": "http://evil.example.net/collect"}, b"")
-ALLOW = {"allow": ["docs.example.com"], "schemes": ["http"]}
+    PAGES[("docs.example.invalid", f"/leave{code}")] = (code, {"Location": "http://evil.example.invalid/collect"}, b"")
+ALLOW = {"allow": ["docs.example.invalid"], "schemes": ["http"]}
+# A Location in raw forms (written with | for a backslash and _ for a tab): WHATWG removes the tab,
+# reads the backslashes as slashes, decodes and lowercases the host, and drops the default port and
+# the dot segments, giving http://docs.example.invalid/guide?q=1.
+RAW = "http:||DOCS%2Eexa_mple.invalid:80|a|..|%2e%2e|guide?q=1".replace("|", chr(92)).replace("_", chr(9))
+PAGES[("docs.example.invalid", "/raw")] = (302, {"Location": RAW}, b"")
+PAGES[("docs.example.invalid", "/numeric")] = (302, {"Location": "http://0x7f.1/guide"}, b"")
 REFUSED_EVERYWHERE = [  # (answers, nat64): each has an answer URLFence does not allow
     (["127.0.0.1"], []), (["10.0.0.1"], []), (["169.254.169.254"], []), (["100.100.100.200"], []),
     (["192.0.0.192"], []), (["::1"], []), (["::ffff:127.0.0.1"], []), (["::ffff:a9fe:a9fe"], []),
@@ -215,34 +221,35 @@ class NodeTest(unittest.TestCase):
 
 class Pinned(NodeTest):
     def test_a_checked_address_is_connected_to_and_the_host_is_kept(self):
-        r = self.fetch("http://docs.example.com/guide?v=3#top", {"docs.example.com": [["8.8.8.8"]]})
+        r = self.fetch("http://docs.example.invalid/guide?v=3#top", {"docs.example.invalid": [["8.8.8.8"]]})
         out = ok(r)
         self.assertEqual((out["status"], out["body"]), (200, b"the guide"))
         self.assertEqual(r["connects"], [["8.8.8.8", 80]])
-        self.assertEqual(r["resolves"], [["docs.example.com", {"all": True}]])
-        self.assertEqual(heads(self.origin.records), [("GET /guide?v=3 HTTP/1.1", "docs.example.com")])
+        self.assertEqual(r["resolves"], [["docs.example.invalid", {"all": True}]])
+        self.assertEqual(heads(self.origin.records), [("GET /guide?v=3 HTTP/1.1", "docs.example.invalid")])
         self.assertEqual(out["hops"][0]["addrs"], [{"addr": "8.8.8.8", "decision": "allow", "reason": None}])
         self.assertEqual(out["hops"][0]["connected"], "8.8.8.8")
 
     def test_the_request_is_for_exactly_the_checked_url(self):
-        urls = {"http://docs.example.com/guide?v=3;a=//b": "GET /guide?v=3;a=//b HTTP/1.1",
-                "http://docs.example.com/a/../guide": "GET /a/../guide HTTP/1.1",
-                "http://docs.example.com?x=1#f": "GET /?x=1 HTTP/1.1"}
-        rs = node([self.item(u, {"docs.example.com": [["8.8.8.8"]]}) for u in urls])
+        urls = {"http://docs.example.invalid/guide?v=3;a=//b": "GET /guide?v=3;a=//b HTTP/1.1",
+                "http://docs.example.invalid/a/../guide": "GET /a/../guide HTTP/1.1",
+                "http://docs.example.invalid?x=1#f": "GET /?x=1 HTTP/1.1"}
+        rs = node([self.item(u, {"docs.example.invalid": [["8.8.8.8"]]}) for u in urls])
         for r in rs:
             ok(r)
-        self.assertEqual(heads(self.origin.records), [(line, "docs.example.com") for line in urls.values()])
+        self.assertEqual(heads(self.origin.records), [(line, "docs.example.invalid") for line in urls.values()])
 
     def test_port_and_ipv6(self):
-        rs = node([self.item("http://docs.example.com:8080/guide", {"docs.example.com": [["2606:4700:4700::1111"]]}),
-                   self.item("http://docs.example.com:80/guide", {"docs.example.com": [["8.8.8.8"]]})])
+        rs = node([self.item("http://docs.example.invalid:8080/guide",
+                             {"docs.example.invalid": [["2606:4700:4700::1111"]]}),
+                   self.item("http://docs.example.invalid:80/guide", {"docs.example.invalid": [["8.8.8.8"]]})])
         self.assertEqual([ok(r)["status"] for r in rs], [200, 200])
         self.assertEqual([r["connects"] for r in rs], [[["2606:4700:4700::1111", 8080]], [["8.8.8.8", 80]]])
-        self.assertEqual(heads(self.origin.records), [("GET /guide HTTP/1.1", "docs.example.com:8080"),
-                                                      ("GET /guide HTTP/1.1", "docs.example.com")])
+        self.assertEqual(heads(self.origin.records), [("GET /guide HTTP/1.1", "docs.example.invalid:8080"),
+                                                      ("GET /guide HTTP/1.1", "docs.example.invalid")])
 
     def test_every_answer_is_checked_before_any_connection(self):
-        rs = node([self.item("http://docs.example.com/guide", {"docs.example.com": [addrs]}, nat64=nat64)
+        rs = node([self.item("http://docs.example.invalid/guide", {"docs.example.invalid": [addrs]}, nat64=nat64)
                    for addrs, nat64 in REFUSED_EVERYWHERE])
         for (addrs, nat64), r in zip(REFUSED_EVERYWHERE, rs):
             with self.subTest(addrs=addrs, nat64=nat64):
@@ -253,10 +260,10 @@ class Pinned(NodeTest):
 
     def test_a_configured_nat64_prefix_decides_on_the_ipv4_address(self):
         good, bad = node([
-            self.item("http://docs.example.com/guide", {"docs.example.com": [["64:ff9b::808:808"]]},
+            self.item("http://docs.example.invalid/guide", {"docs.example.invalid": [["64:ff9b::808:808"]]},
                       nat64=["64:ff9b::/96"]),
             # A prefix nat64Ok would ignore is a usage error, and the fetch refuses.
-            self.item("http://docs.example.com/guide", {"docs.example.com": [["64:ff9b:1::808:808"]]},
+            self.item("http://docs.example.invalid/guide", {"docs.example.invalid": [["64:ff9b:1::808:808"]]},
                       nat64=["64:ff9b:1::/96"])])
         self.assertEqual(ok(good)["status"], 200)
         self.assertEqual(good["connects"], [["64:ff9b::808:808", 80]])
@@ -264,42 +271,45 @@ class Pinned(NodeTest):
         self.assertEqual(bad["connects"], [])
 
     def test_deny_addr(self):
-        r = self.fetch("http://docs.example.com/guide", {"docs.example.com": [["8.8.8.8"]]}, denyAddr=["8.8.0.0/16"])
+        r = self.fetch("http://docs.example.invalid/guide", {"docs.example.invalid": [["8.8.8.8"]]},
+                       denyAddr=["8.8.0.0/16"])
         self.assertIn("deny 8.8.0.0/16", refused(r)["message"])
         self.assertEqual(r["connects"], [])
 
     def test_an_answer_that_changes_between_hops_is_checked_again(self):
         # Public on the first lookup, loopback on the second: the redirect is not followed.
-        r = self.fetch("http://docs.example.com/moved", {"docs.example.com": [["8.8.8.8"], ["127.0.0.1"]]})
+        r = self.fetch("http://docs.example.invalid/moved", {"docs.example.invalid": [["8.8.8.8"], ["127.0.0.1"]]})
         hops = refused(r)["hops"]
-        self.assertEqual([h["url"] for h in hops], ["http://docs.example.com/moved", "http://docs.example.com/guide"])
+        self.assertEqual([h["url"] for h in hops],
+                         ["http://docs.example.invalid/moved", "http://docs.example.invalid/guide"])
         self.assertEqual(hops[1]["addrs"][0]["decision"], "deny")
         self.assertEqual(r["connects"], [["8.8.8.8", 80]])
-        self.assertEqual([h for h, _ in r["resolves"]], ["docs.example.com", "docs.example.com"])
+        self.assertEqual([h for h, _ in r["resolves"]], ["docs.example.invalid", "docs.example.invalid"])
 
     def test_a_redirect_to_an_allowed_host_with_a_denied_address_is_not_followed(self):
-        allow = ["docs.example.com", "api.example.com"]
+        allow = ["docs.example.invalid", "api.example.invalid"]
         denied, fine = node([
-            self.item("http://docs.example.com/to-api", {"docs.example.com": [["8.8.8.8"]],
-                                                         "api.example.com": [["10.0.0.1"]]}, allow=allow),
-            self.item("http://docs.example.com/to-api", {"docs.example.com": [["8.8.8.8"]],
-                                                         "api.example.com": [["1.1.1.1"]]}, allow=allow)])
+            self.item("http://docs.example.invalid/to-api", {"docs.example.invalid": [["8.8.8.8"]],
+                                                         "api.example.invalid": [["10.0.0.1"]]}, allow=allow),
+            self.item("http://docs.example.invalid/to-api", {"docs.example.invalid": [["8.8.8.8"]],
+                                                         "api.example.invalid": [["1.1.1.1"]]}, allow=allow)])
         hops = refused(denied)["hops"]
         self.assertEqual([(h["url"], h["decision"]) for h in hops],
-                         [("http://docs.example.com/to-api", "allow"), ("http://api.example.com/data", "allow")])
+                         [("http://docs.example.invalid/to-api", "allow"),
+                          ("http://api.example.invalid/data", "allow")])
         self.assertEqual(hops[1]["addrs"][0]["decision"], "deny")
         self.assertEqual(denied["connects"], [["8.8.8.8", 80]])
         self.assertEqual(ok(fine)["body"], b"api data")
         self.assertEqual(fine["connects"], [["8.8.8.8", 80], ["1.1.1.1", 80]])
-        self.assertEqual(heads(self.origin.records), [("GET /to-api HTTP/1.1", "docs.example.com")] * 2
-                         + [("GET /data HTTP/1.1", "api.example.com")])
+        self.assertEqual(heads(self.origin.records), [("GET /to-api HTTP/1.1", "docs.example.invalid")] * 2
+                         + [("GET /data HTTP/1.1", "api.example.invalid")])
 
     def test_https_uses_the_url_host_as_server_name(self):
         # The fixture ends the handshake with an alert, so the fetch fails after the ClientHello.
-        r = self.fetch("https://docs.example.com/guide", {"docs.example.com": [["8.8.8.8"]]}, schemes=["https"])
+        r = self.fetch("https://docs.example.invalid/guide", {"docs.example.invalid": [["8.8.8.8"]]}, schemes=["https"])
         refused(r)
         self.assertEqual(r["connects"], [["8.8.8.8", 443]])
-        self.assertEqual([compat.client_hello_names(d) for d in self.origin.records], [["docs.example.com"]])
+        self.assertEqual([compat.client_hello_names(d) for d in self.origin.records], [["docs.example.invalid"]])
 
     def test_an_ip_host_allowed_by_the_url_check_is_still_checked(self):
         r = self.fetch("http://127.0.0.1/guide", {"127.0.0.1": [["127.0.0.1"]]}, allow=["127.0.0.1"])
@@ -307,9 +317,9 @@ class Pinned(NodeTest):
         self.assertEqual(r["connects"], [])
 
     def test_no_lookup_for_a_refused_url_and_no_connection_without_an_answer(self):
-        rs = node([self.item("http://evil.example.net/", {"evil.example.net": [["8.8.8.8"]]}),
-                   self.item("http://docs.example.com/guide", {}),
-                   self.item("http://docs.example.com/guide", {"docs.example.com": [[]]})])
+        rs = node([self.item("http://evil.example.invalid/", {"evil.example.invalid": [["8.8.8.8"]]}),
+                   self.item("http://docs.example.invalid/guide", {}),
+                   self.item("http://docs.example.invalid/guide", {"docs.example.invalid": [[]]})])
         self.assertEqual(rs[0]["resolves"], [])
         self.assertIn("could not resolve", refused(rs[1])["message"])
         self.assertIn("has no address", refused(rs[2])["message"])
@@ -318,75 +328,107 @@ class Pinned(NodeTest):
     def test_one_lookup_per_hop(self):
         # The resolver throws on any lookup beyond the ones each hop needs; node itself resolves
         # nothing (the driver refuses and reports dns.lookup).
-        rs = node([self.item("http://docs.example.com/guide", {"docs.example.com": [["8.8.8.8"], "throw"]}),
-                   self.item("http://docs.example.com/moved",
-                             {"docs.example.com": [["8.8.8.8"], ["8.8.8.8"], "throw"]}),
-                   self.item("http://docs.example.com/guide", {"docs.example.com": ["throw"]})])
+        rs = node([self.item("http://docs.example.invalid/guide", {"docs.example.invalid": [["8.8.8.8"], "throw"]}),
+                   self.item("http://docs.example.invalid/moved",
+                             {"docs.example.invalid": [["8.8.8.8"], ["8.8.8.8"], "throw"]}),
+                   self.item("http://docs.example.invalid/guide", {"docs.example.invalid": ["throw"]})])
         self.assertEqual([ok(r)["status"] for r in rs[:2]], [200, 200])
         self.assertEqual([len(r["resolves"]) for r in rs], [1, 2, 1])
         self.assertIn("could not resolve", refused(rs[2])["message"])
         self.assertEqual([r["connects"] for r in rs], [[["8.8.8.8", 80]], [["8.8.8.8", 80]] * 2, []])
 
     def test_the_default_resolver_is_dns_promises_lookup(self):
-        item = self.item("http://docs.example.com/guide", None)
+        item = self.item("http://docs.example.invalid/guide", None)
         del item["answers"]
         r = node([item], lookups=True)[0]
         self.assertIn("could not resolve", refused(r)["message"])
-        self.assertEqual((r["lookups"], r["connects"]), (["docs.example.com"], []))
+        self.assertEqual((r["lookups"], r["connects"]), (["docs.example.invalid"], []))
 
     def test_every_redirect_is_checked(self):
-        rs = node([self.item("http://docs.example.com" + p, {"docs.example.com": [["8.8.8.8"]]})
+        rs = node([self.item("http://docs.example.invalid" + p, {"docs.example.invalid": [["8.8.8.8"]]})
                    for p in ("/moved", "/relative", "/upper")])
-        # Location is resolved as WHATWG does: `http://DOCS.example.com/guide` becomes lowercase.
+        # Location is resolved as WHATWG does: `http://DOCS.example.invalid/guide` becomes lowercase.
         for r in rs:
             out = ok(r)
             self.assertEqual(out["status"], 200)
-            self.assertEqual(out["hops"][1]["url"], "http://docs.example.com/guide")
+            self.assertEqual(out["hops"][1]["url"], "http://docs.example.invalid/guide")
+
+    def test_a_redirect_target_is_normalised_then_checked_and_requested_exactly(self):
+        rs = node([self.item("http://docs.example.invalid/raw", {"docs.example.invalid": [["8.8.8.8"]]}),
+                   self.item("http://docs.example.invalid/numeric", {"docs.example.invalid": [["8.8.8.8"]],
+                                                                     "127.0.0.1": [["127.0.0.1"]]},
+                             allow=["docs.example.invalid", "127.0.0.1"])])
+        out = ok(rs[0])
+        self.assertEqual([h["url"] for h in out["hops"]],
+                         ["http://docs.example.invalid/raw", "http://docs.example.invalid/guide?q=1"])
+        self.assertEqual(out["body"], b"the guide")
+        self.assertEqual(heads(self.origin.records[:2]), [("GET /raw HTTP/1.1", "docs.example.invalid"),
+                                                          ("GET /guide?q=1 HTTP/1.1", "docs.example.invalid")])
+        # guarded_fetch.py would check urljoin's result, which keeps the raw forms and is refused.
+        joined = urllib.parse.urljoin("http://docs.example.invalid/raw", RAW)
+        self.assertEqual(run_check([joined], ["docs.example.invalid"], schemes=["http"])[1][0]["decision"], "reject")
+        # `0x7f.1` becomes 127.0.0.1: allowed by the URL check here, refused by the address check.
+        hops = refused(rs[1])["hops"]
+        self.assertEqual([(h["url"], h["decision"]) for h in hops],
+                         [("http://docs.example.invalid/numeric", "allow"), ("http://127.0.0.1/guide", "allow")])
+        self.assertEqual(hops[1]["addrs"][0]["decision"], "deny")
+        self.assertEqual(rs[1]["connects"], [["8.8.8.8", 80]])
+        self.assertEqual(len(self.origin.records), 3)
+
+    def test_tls_options_that_could_turn_verification_off_are_refused(self):
+        options = ({"rejectUnauthorized": False}, {"checkServerIdentity": None}, {"session": "x"})
+        rs = node([self.item("https://docs.example.invalid/guide", {"docs.example.invalid": [["8.8.8.8"]]},
+                             schemes=["https"], tls=t, pin=pin) for t in options for pin in (True, False)])
+        for r in rs:
+            self.assertIn("is not an option", refused(r, "TypeError")["message"])
+            self.assertEqual((r["resolves"], r["connects"]), ([], []))
 
     def test_a_redirect_to_another_host_is_refused_before_it_is_requested(self):
         cases = [(f"/leave{code}", "deny") for code in (301, 302, 303, 307, 308)] + [("/sneaky", "reject")]
-        rs = node([self.item("http://docs.example.com" + p, {"docs.example.com": [["8.8.8.8"]]}) for p, _ in cases])
+        rs = node([self.item("http://docs.example.invalid" + p, {"docs.example.invalid": [["8.8.8.8"]]})
+                   for p, _ in cases])
         for (path, decision), r in zip(cases, rs):
             with self.subTest(path=path):
                 self.assertEqual(refused(r)["hops"][-1]["decision"], decision)
                 self.assertEqual(len(r["resolves"]), 1)
-        self.assertEqual(heads(self.origin.records), [(f"GET {p} HTTP/1.1", "docs.example.com") for p, _ in cases])
+        self.assertEqual(heads(self.origin.records), [(f"GET {p} HTTP/1.1", "docs.example.invalid") for p, _ in cases])
 
     def test_refused_urls_are_never_requested(self):
-        urls = ("http://docs.example.com.evil.example.net/", "http://docs.example.com@evil.example.net/",
-                "http://DOCS.example.com/guide", "http://127.1/", "https://docs.example.com/guide")
-        answers = {"docs.example.com": [["8.8.8.8"]], "docs.example.com.evil.example.net": [["8.8.8.8"]]}
+        urls = ("http://docs.example.invalid.evil.example.invalid/",
+                "http://docs.example.invalid@evil.example.invalid/",
+                "http://DOCS.example.invalid/guide", "http://127.1/", "https://docs.example.invalid/guide")
+        answers = {"docs.example.invalid": [["8.8.8.8"]], "docs.example.invalid.evil.example.invalid": [["8.8.8.8"]]}
         for r in node([self.item(u, answers) for u in urls]):
             refused(r)
             self.assertEqual((r["resolves"], r["connects"]), ([], []))
         self.assertEqual(self.origin.records, [])
 
     def test_a_redirect_loop_stops(self):
-        r = self.fetch("http://docs.example.com/loop", {"docs.example.com": [["8.8.8.8"]]}, maxRedirects=3)
+        r = self.fetch("http://docs.example.invalid/loop", {"docs.example.invalid": [["8.8.8.8"]]}, maxRedirects=3)
         self.assertEqual(refused(r)["message"], "more than 3 redirects")
         self.assertEqual(len(self.origin.records), 4)
 
     def test_a_broken_answer_refuses(self):
-        r = self.fetch("http://docs.example.com/broken", {"docs.example.com": [["8.8.8.8"]]})
+        r = self.fetch("http://docs.example.invalid/broken", {"docs.example.invalid": [["8.8.8.8"]]})
         self.assertIn("request failed", refused(r)["message"])
 
     def test_the_body_is_cut_at_max_bytes(self):
-        rs = node([self.item("http://docs.example.com/large", {"docs.example.com": [["8.8.8.8"]]}, **kw)
+        rs = node([self.item("http://docs.example.invalid/large", {"docs.example.invalid": [["8.8.8.8"]]}, **kw)
                    for kw in ({"maxBytes": 1000}, {"maxBytes": 0}, {})])
         self.assertEqual([(ok(r)["status"], ok(r)["body"]) for r in rs],
                          [(200, b"z" * 1000), (200, b""), (200, b"z" * 50_000)])
 
 
 class Proxies(NodeTest):
-    URL = "http://docs.example.com/guide"
-    ANSWERS = {"docs.example.com": [["8.8.8.8"]]}
+    URL = "http://docs.example.invalid/guide"
+    ANSWERS = {"docs.example.invalid": [["8.8.8.8"]]}
 
     def test_a_proxy_node_would_use_refuses_before_anything_is_resolved(self):
         proxy = "http://127.0.0.1:9"
         envs = [{"NODE_USE_ENV_PROXY": "1", "HTTP_PROXY": proxy}, {"NODE_USE_ENV_PROXY": "1", "http_proxy": proxy},
                 {"NODE_USE_ENV_PROXY": "true", "HTTP_PROXY": proxy}]
         rs = node([self.item(self.URL, self.ANSWERS, env=e) for e in envs]
-                  + [self.item("https://docs.example.com/guide", self.ANSWERS, schemes=["https"],
+                  + [self.item("https://docs.example.invalid/guide", self.ANSWERS, schemes=["https"],
                                env={"NODE_USE_ENV_PROXY": "1", "HTTPS_PROXY": proxy})])
         for r in rs:
             self.assertIn("proxy", refused(r)["message"])
@@ -411,27 +453,29 @@ class Proxies(NodeTest):
 
 class Unpinned(NodeTest):
     def test_node_requests_exactly_the_checked_url_and_redirects_are_still_checked(self):
-        rs = node([self.item("http://docs.example.com/guide?v=3;a=//b", {}, pin=False),
-                   self.item("http://docs.example.com/leave302", {}, pin=False),
-                   self.item("http://docs.example.com/moved", {}, pin=False, agent=True)])
+        rs = node([self.item("http://docs.example.invalid/guide?v=3;a=//b", {}, pin=False),
+                   self.item("http://docs.example.invalid/leave302", {}, pin=False),
+                   self.item("http://docs.example.invalid/moved", {}, pin=False, agent=True)])
         self.assertEqual(ok(rs[0])["body"], b"the guide")
         self.assertEqual(refused(rs[1])["hops"][-1]["decision"], "deny")
         self.assertEqual(ok(rs[2])["status"], 200)
         # Node connects to the name (resolving it itself, which the driver preempts); no address
         # is checked, and the caller's agent is used.
         self.assertEqual([r["connects"] for r in rs],
-                         [[["docs.example.com", 80]], [["docs.example.com", 80]], [["docs.example.com", 80]] * 2])
+                         [[["docs.example.invalid", 80]], [["docs.example.invalid", 80]],
+                          [["docs.example.invalid", 80]] * 2])
         self.assertEqual([r["resolves"] for r in rs], [[], [], []])
         self.assertEqual(rs[2].get("agent"), 2)
-        self.assertEqual(heads(self.origin.records), [("GET /guide?v=3;a=//b HTTP/1.1", "docs.example.com"),
-                                                      ("GET /leave302 HTTP/1.1", "docs.example.com"),
-                                                      ("GET /moved HTTP/1.1", "docs.example.com"),
-                                                      ("GET /guide HTTP/1.1", "docs.example.com")])
+        self.assertEqual(heads(self.origin.records), [("GET /guide?v=3;a=//b HTTP/1.1", "docs.example.invalid"),
+                                                      ("GET /leave302 HTTP/1.1", "docs.example.invalid"),
+                                                      ("GET /moved HTTP/1.1", "docs.example.invalid"),
+                                                      ("GET /guide HTTP/1.1", "docs.example.invalid")])
 
 
 class Certificates(NodeTest):
-    """Pinned https against fixtures that complete the handshake, each with a throwaway self-signed
-    certificate for one name: the certificate must match the URL's host, not the address connected to."""
+    """https against fixtures that complete the handshake, each with a throwaway self-signed
+    certificate for one name: the certificate must match the URL's host, not the address connected
+    to, and is verified whatever NODE_TLS_REJECT_UNAUTHORIZED says, pinned or not."""
 
     @classmethod
     def setUpClass(cls):
@@ -440,7 +484,8 @@ class Certificates(NodeTest):
         d = tempfile.mkdtemp()
         cls.addClassCleanup(shutil.rmtree, d)
         cls.certs = {}
-        for name, san in (("docs", "DNS:docs.example.com"), ("other", "DNS:other.example.com"), ("ip", "IP:8.8.8.8")):
+        for name, san in (("docs", "DNS:docs.example.invalid"), ("other", "DNS:other.example.invalid"),
+                          ("ip", "IP:8.8.8.8")):
             cert, key = os.path.join(d, name + ".pem"), os.path.join(d, name + ".key")
             subprocess.run([OPENSSL, "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
                             "-nodes", "-days", "1", "-subj", "/CN=urlfence test", "-addext", "subjectAltName=" + san,
@@ -455,15 +500,15 @@ class Certificates(NodeTest):
 
     def test_the_certificate_must_match_the_url_host(self):
         origins = {n: self.origin_for(n) for n in self.certs}
-        answers = {"docs.example.com": [["8.8.8.8"]], "8.8.8.8": [["8.8.8.8"]]}
+        answers = {"docs.example.invalid": [["8.8.8.8"]], "8.8.8.8": [["8.8.8.8"]]}
 
         def item(url, cert, ca=None, **kw):
-            return self.item(url, answers, schemes=["https"], allow=["docs.example.com", "8.8.8.8"],
+            return self.item(url, answers, schemes=["https"], allow=["docs.example.invalid", "8.8.8.8"],
                              ca=self.certs[ca or cert][2], origin=origins[cert].port, **kw)
 
-        rs = node([item("https://docs.example.com/guide", "docs"),
-                   item("https://docs.example.com/guide", "other"),
-                   item("https://docs.example.com/guide", "ip"),  # a certificate for the address connected to
+        rs = node([item("https://docs.example.invalid/guide", "docs"),
+                   item("https://docs.example.invalid/guide", "other"),
+                   item("https://docs.example.invalid/guide", "ip"),  # a certificate for the address connected to
                    item("https://8.8.8.8/guide", "ip"),
                    item("https://8.8.8.8/guide", "docs")])
         good = ok(rs[0])
@@ -472,21 +517,44 @@ class Certificates(NodeTest):
         for r in (rs[1], rs[2], rs[4]):
             self.assertIn("altnames", refused(r)["message"])
         self.assertEqual([r["connects"] for r in rs], [[["8.8.8.8", 443]]] * 5)
-        self.assertEqual(heads(origins["docs"].records), [("GET /guide HTTP/1.1", "docs.example.com")])
+        self.assertEqual(heads(origins["docs"].records), [("GET /guide HTTP/1.1", "docs.example.invalid")])
         self.assertEqual(heads(origins["ip"].records), [("GET /guide HTTP/1.1", "8.8.8.8")])
         self.assertEqual(origins["other"].records, [])
         # The server name is the URL's host, and none for an address (RFC 6066).
         self.assertEqual((origins["docs"].names, origins["other"].names, origins["ip"].names),
-                         (["docs.example.com", None], ["docs.example.com"], ["docs.example.com", None]))
+                         (["docs.example.invalid", None], ["docs.example.invalid"], ["docs.example.invalid", None]))
 
     def test_the_certificate_is_verified_by_default(self):
         o = self.origin_for("docs")
-        item = self.item("https://docs.example.com/guide", {"docs.example.com": [["8.8.8.8"]]}, schemes=["https"],
+        item = self.item("https://docs.example.invalid/guide", {"docs.example.invalid": [["8.8.8.8"]]},
+                         schemes=["https"],
                          origin=o.port)
         rs = node([item, {**item, "env": {"NODE_TLS_REJECT_UNAUTHORIZED": "0"}}])
         for r in rs:
             self.assertRegex(refused(r)["message"], "self.signed")  # OpenSSL 1.1 has no hyphen
         self.assertEqual(o.records, [])
+
+    def test_unpinned_requests_verify_the_certificate_too(self):
+        docs, other = self.origin_for("docs"), self.origin_for("other")
+
+        def item(origin, **kw):
+            return self.item("https://docs.example.invalid/guide", {}, schemes=["https"], pin=False,
+                             origin=origin.port, **kw)
+
+        rs = node([item(docs, ca=self.certs["docs"][2]),
+                   item(docs, env={"NODE_TLS_REJECT_UNAUTHORIZED": "0"}),
+                   item(docs, ca=self.certs["docs"][2], env={"NODE_TLS_REJECT_UNAUTHORIZED": "0"}),
+                   item(other, ca=self.certs["other"][2]),
+                   item(docs, agent={"rejectUnauthorized": False})])
+        self.assertEqual([ok(r)["body"] for r in rs[:1] + rs[2:3]], [b"the guide"] * 2)
+        self.assertRegex(refused(rs[1])["message"], "self.signed")
+        self.assertIn("altnames", refused(rs[3])["message"])
+        # An agent's own options override the example's: this one does not verify.
+        self.assertEqual(ok(rs[4])["body"], b"the guide")
+        self.assertEqual([r["connects"] for r in rs], [[["docs.example.invalid", 443]]] * 5)
+        self.assertEqual([r["resolves"] for r in rs], [[]] * 5)
+        self.assertEqual(heads(docs.records), [("GET /guide HTTP/1.1", "docs.example.invalid")] * 3)
+        self.assertEqual(other.records, [])
 
 
 class OpenSocket(NodeTest):
@@ -516,7 +584,7 @@ class OpenSocket(NodeTest):
 
 
 class UnusableAnswers(NodeTest):
-    URL = "http://docs.example.com/guide"
+    URL = "http://docs.example.invalid/guide"
 
     @classmethod
     def setUpClass(cls):
@@ -537,7 +605,7 @@ class UnusableAnswers(NodeTest):
 
     def test_each_refuses(self):
         good = b'{"input":"%s","decision":"allow"}\n' % self.URL.encode()
-        cases = ((0, b'{"input":"http://docs.example.com/other","decision":"allow"}\n'), (1, good), (3, good),
+        cases = ((0, b'{"input":"http://docs.example.invalid/other","decision":"allow"}\n'), (1, good), (3, good),
                  (0, b"not json\n"), (0, b"[]\n"), (0, b""), (0, good + good),
                  (0, b'{"input":"%s"}\n' % self.URL.encode()))
         rs = self.run_fake([self.check(code=c, out=o) for c, o in cases] + [self.check(code=0, out=good)])
@@ -555,6 +623,13 @@ class UnusableAnswers(NodeTest):
         r = self.run_fake([self.check(options={"timeout": 300}, sleep=5, out=b"")])[0]
         self.assertEqual(ok(r), {"decision": "reject", "reason": "urlfence did not run: no answer within 300 ms"})
         self.assertLess(time.monotonic() - start, 4)
+        # Node takes 0 as no timeout at all, so it is refused.
+        zero = self.run_fake([self.check(options={"timeout": 0}),
+                              {"op": "checkAddrs", "addrs": ["8.8.8.8"], "options": {"timeout": 0}},
+                              self.item(self.URL, {"docs.example.invalid": [["8.8.8.8"]]}, timeout=0)])
+        for r in zero:
+            self.assertIn("at least 1 ms", refused(r, "TypeError")["message"])
+            self.assertEqual((r["resolves"], r["connects"]), ([], []))
 
     def test_a_missing_binary_refuses(self):
         r = node([self.check()], env={"URLFENCE_BIN": os.path.join(ROOT, "no-such-urlfence")})[0]
@@ -562,13 +637,13 @@ class UnusableAnswers(NodeTest):
         self.assertTrue(ok(r)["reason"].startswith("urlfence did not run"))
 
     def test_input_the_binary_cannot_take_refuses(self):
-        bad = ("http://docs.example.com/a\x00b", "http://docs.example.com/\ud800", None)
+        bad = ("http://docs.example.invalid/a\x00b", "http://docs.example.invalid/\ud800", None)
         for u, r in zip(bad, self.run_fake([self.check(u) for u in bad])):
             with self.subTest(url=repr(u)):
                 self.assertEqual(ok(r)["decision"], "reject")
 
     def test_a_single_string_policy_is_an_error(self):
-        rs = self.run_fake([self.check(options={"allow": "docs.example.com"}),
+        rs = self.run_fake([self.check(options={"allow": "docs.example.invalid"}),
                             {"op": "checkAddrs", "addrs": ["8.8.8.8"], "options": {"deny": "10.0.0.0/8"}}])
         for r in rs:
             refused(r, "TypeError")
@@ -598,8 +673,8 @@ class UnusableAnswers(NodeTest):
 
         cases = [("8.8.8.8", a) for a in ("127.0.0.1", "8.8.4.4", "localhost", None, 134744072, "::ffff:8.8.8.8",
                                           "::ffff:808:808", "8.8.8.8 ")]
-        rs = self.run_fake([self.item(self.URL, {"docs.example.com": [[i]]}, env=answer(i, a)) for i, a in cases]
-                           + [self.item(self.URL, {"docs.example.com": [["2606:4700:4700::1111"]]},
+        rs = self.run_fake([self.item(self.URL, {"docs.example.invalid": [[i]]}, env=answer(i, a)) for i, a in cases]
+                           + [self.item(self.URL, {"docs.example.invalid": [["2606:4700:4700::1111"]]},
                                         env=answer("2606:4700:4700::1111", "2606:4700:4700:0:0:0:0:1111"))])
         for (_, a), r in zip(cases, rs):
             with self.subTest(addr=a):
@@ -607,23 +682,6 @@ class UnusableAnswers(NodeTest):
                 self.assertEqual(r["connects"], [])
         self.assertEqual(ok(rs[-1])["status"], 200)
         self.assertEqual(rs[-1]["connects"], [["2606:4700:4700:0:0:0:0:1111", 80]])
-
-
-class Cli(NodeTest):
-    def run_cli(self, *args):
-        env = {k: v for k, v in os.environ.items() if k not in CLEAN}
-        env["URLFENCE_BIN"] = BIN
-        return subprocess.run([NODE, EXAMPLE, *args], capture_output=True, env=env, timeout=60, check=False)
-
-    def test_usage_and_a_refusal(self):
-        p = self.run_cli("--allow", "docs.example.com")
-        self.assertEqual((p.returncode, p.stdout), (2, b""))
-        self.assertIn(b"usage:", p.stderr)
-        # Refused before anything is resolved: http is not an allowed scheme here.
-        p = self.run_cli("--allow", "docs.example.com", "--", "http://docs.example.com/")
-        self.assertEqual((p.returncode, p.stdout), (1, b""))
-        out = json.loads(p.stderr)
-        self.assertEqual([(h["url"], h["decision"]) for h in out["hops"]], [("http://docs.example.com/", "deny")])
 
 
 if __name__ == "__main__":

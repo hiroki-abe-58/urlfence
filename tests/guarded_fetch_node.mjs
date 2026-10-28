@@ -21,6 +21,7 @@
 import dns from "node:dns";
 import fs from "node:fs";
 import http from "node:http";
+import https from "node:https";
 import net from "node:net";
 import * as gf from "../examples/guarded_fetch.mjs";
 
@@ -88,9 +89,9 @@ function failure(e) {
 async function fetchItem(item) {
   const options = { ...item.options };
   if (item.answers !== undefined) options.resolve = resolver(item.answers);
-  if (item.ca !== undefined) options.tls = { ca: item.ca };
-  if (item.agent) {
-    options.agent = new http.Agent();
+  if (item.ca !== undefined) options.tls = { ...options.tls, ca: item.ca };
+  if (item.agent) { // true, or the options of an https.Agent
+    options.agent = item.agent === true ? new http.Agent() : new https.Agent(item.agent);
     const create = options.agent.createConnection;
     options.agent.createConnection = function createConnection(...a) {
       rec.agent = (rec.agent ?? 0) + 1;

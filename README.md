@@ -361,12 +361,13 @@ and JSON output are ordinary code, covered by tests.
   (in one test, throwing on any lookup beyond one per hop). It covers the pinned cases above, the
   request target, a redirect to another allowed host whose address is denied, an answer whose
   `addr` is not the address checked, the environment proxies, `pin: false`, and the example's
-  `openSocket` against a listener (numeric addresses only, with and without `autoSelectFamily`).
-  With openssl, https
-  fixtures with throwaway self-signed certificates check that the certificate must match the
-  URL's host, not the address connected to. Unusable answers come from a stand-in binary
-  (`URLFENCE_BIN`). Skipped without node or openssl, unless `URLFENCE_REQUIRE` names them, as CI
-  and `scripts/reproduce.sh` do.
+  `openSocket` against a listener (numeric addresses only, with and without `autoSelectFamily`),
+  a redirect to raw forms that WHATWG normalises (checked and requested as the normalised string),
+  and refused `tls` options and timeouts. With openssl, https fixtures with throwaway self-signed
+  certificates check that the certificate must match the URL's host, not the address connected
+  to, and is verified, pinned or not, under `NODE_TLS_REJECT_UNAUTHORIZED=0`. Unusable answers come
+  from a stand-in binary (`URLFENCE_BIN`). Every name is under `.invalid`. Skipped without node or
+  openssl, unless `URLFENCE_REQUIRE` names them, as CI and `scripts/reproduce.sh` do.
 * `tests/mutants.py` plants 26 plausible bugs, one at a time, and requires each one to be caught.
   They include the CVE-style prefix and suffix mistakes, a wrong authority boundary, accepting
   octal IPv4 parts, and for addresses: no IPv4-mapped decoding, the IPv4 address taken at the wrong
@@ -386,7 +387,7 @@ and JSON output are ordinary code, covered by tests.
 [`scripts/reproduce.sh`](scripts/reproduce.sh) runs all of this from a fresh clone of the current
 commit in a temporary directory: the pins, the build, the audit, the registry check, the tests, the
 client comparison on the full corpus and the mutation check, and prints the binary's SHA-256. It
-takes about two and a half minutes, and, like CI, fails if node, curl or openssl is missing.
+takes about three minutes, and, like CI, fails if node, curl or openssl is missing.
 
 ## Usage
 
@@ -447,11 +448,17 @@ longer than `TIMEOUT`.
 
 [`examples/guarded_fetch.mjs`](examples/guarded_fetch.mjs) is the same example for Node 18 and
 later (ESM, no dependencies), with the same rules: `await guardedFetch(url, { allow: [...] })`
-gives `{ status, body, hops }` or rejects with `Refused`, and
-`node examples/guarded_fetch.mjs --allow PATTERN -- URL` runs it from a shell. Its
-header lists where it differs from the Python one; mainly, a `Location` is resolved as WHATWG
-resolves it, so the next URL is normalised (a host in uppercase becomes lowercase) before it is
-checked. Pinned (the default), on every hop it resolves the host once (`dns.promises.lookup`, or
+gives `{ status, body, hops }` or rejects with `Refused`. Its header lists where it differs from
+the Python one. Mainly, a `Location` is resolved as WHATWG resolves it (`new URL(location, url)`),
+which normalises it before it is checked: the host is percent-decoded and lowercased
+(`DOCS%2Eexample.com` becomes `docs.example.com`), tabs and newlines are removed, backslashes
+become slashes, dot segments (also `%2e%2e`) and a default port are dropped, IPv4 number forms are
+made canonical (`0x7f.1` becomes `127.0.0.1`), and a space in the path becomes `%20`. The Python
+example checks urljoin's result instead, and URLFence refuses these raw forms. This is no way
+around the check: the normalised string is what is checked, its addresses included, and exactly
+what is requested, and a server could have sent that string in the first place.
+
+Pinned (the default), on every hop it resolves the host once (`dns.promises.lookup`, or
 the `resolve` option), runs `urlfence addr` on every answer (`denyAddr`, `nat64`), refuses unless
 each answer is allowed and its `addr` is the address checked (compared as numbers), and opens the
 connection itself: `net.connect` or `tls.connect` with that address as `host`, for which Node's
@@ -459,16 +466,22 @@ connection itself: `net.connect` or `tls.connect` with that address as `host`, f
 `lookup` that refuses. The request then goes over that socket, with no Agent. For https the server
 name is the URL's host (none for an IPv4 host) and the certificate is checked against the URL's
 host, not the address: the example calls `checkServerIdentity` with it. Certificates are verified
-even under `NODE_TLS_REJECT_UNAUTHORIZED=0`; `tls` passes on a few options such as `ca`.
+even under `NODE_TLS_REJECT_UNAUTHORIZED=0`. `tls` passes on CA, client certificate, cipher and
+version options (`ca`, say) and refuses any other, such as `rejectUnauthorized` or
+`checkServerIdentity`, which could turn verification off. With `pin: false` these options and
+`rejectUnauthorized: true` go to `https.request`, but there the options of an `agent` passed in
+override them: an agent made with `rejectUnauthorized: false` does not verify.
 
 Proxies: Node 18's `http` and `https` take no proxy from the environment. Node 24.13.0 (its
 source read and its agents tried by hand; not in the tests) gives its two global agents a proxy
 from `HTTP_PROXY` and `HTTPS_PROXY` (and `NO_PROXY`) when `NODE_USE_ENV_PROXY=1` or
 `--use-env-proxy` is set, and `fetch()` one too; agents that code creates, and requests without an
-agent, connect directly. Other versions were not examined. While pinning, the example refuses
-when that support may be on (`NODE_USE_ENV_PROXY` set to anything but `0`, `--use-env-proxy` in
-the arguments or `NODE_OPTIONS`, or a global agent with a proxy configuration) and a proxy is set
-for the scheme; it does not read `NO_PROXY`. With `pin: false`, `http(s).request` with the `agent` given (or the
+agent, connect directly. Other versions were not examined. Pinning does not depend on this:
+a pinned request never uses an Agent, so no proxy can take it over. But so that a configured proxy
+is not bypassed without a word, the example refuses to pin when that support may be on
+(`NODE_USE_ENV_PROXY` set to anything but `0`, `--use-env-proxy` in the arguments or
+`NODE_OPTIONS`, or a global agent with a proxy configuration) and a proxy is set for the scheme;
+it does not read `NO_PROXY`. With `pin: false`, `http(s).request` with the `agent` given (or the
 global agent, and any proxy it uses) resolves the name itself, and no address is checked; with
 `pin: true`, an `agent` is an error.
 
