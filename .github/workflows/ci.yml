@@ -21,7 +21,7 @@ jobs:
         run: ./scripts/audit.sh
       - name: Registry tables equal the IANA files in data/
         run: python3 scripts/check_registry.py
-      - name: CLI tests (fixed cases; WHATWG differential with the runner's node)
+      - name: Tests (CLI cases; WHATWG differential with the runner's node; addresses against inet_pton, ipaddress and is_global; guarded_fetch)
         run: python3 -m unittest discover -s tests -v
       - name: Client compatibility (self-test, then a fixed subset; parsers, requests through a local proxy fixture, direct connections to a local fixture)
         run: |

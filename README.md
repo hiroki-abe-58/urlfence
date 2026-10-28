@@ -1,7 +1,8 @@
 # URLFence
 
 A URL host allowlist check for AI-agent web tools (fetch, browse, documentation lookup): "may this
-agent request this URL?". It is written and proven in Lean 4, and comes with a command-line tool.
+agent request this URL?", and a check of the addresses a host name resolves to: "may it connect
+there?". Both are written and proven in Lean 4, and come with a command-line tool.
 
 ```console
 $ urlfence check --allow docs.python.org --allow '*.example.com' -- https://docs.python.org/3/ https://docs.python.org.evil.com/ https://docs.python.org@evil.com/
@@ -14,8 +15,10 @@ Status: v0.1.0, experimental.
 
 > **URLFence decides on the URL string, and it fails closed.** It accepts only a strict, canonical
 > form of `http(s)` URLs and refuses everything else, including many URLs a browser would accept.
-> It does not resolve DNS, so a name it allows can still point to an internal address (DNS
-> rebinding). It does not follow redirects either: check every hop, not only the first URL. See
+> `urlfence check` does not resolve DNS, so a name it allows can still point to an internal address
+> (DNS rebinding): check each resolved address with `urlfence addr` and connect only to a checked
+> one, as [`examples/guarded_fetch.py`](examples/guarded_fetch.py) does. It does not follow
+> redirects either: check every hop, not only the first URL. See
 > [What it does not cover](#what-it-does-not-cover).
 
 ## Why
@@ -36,11 +39,18 @@ Checks on URLs keep failing in the same few ways, including in AI-agent tools:
 * **IP literals in unexpected forms:** [CVE-2026-49857](https://www.cve.org/CVERecord?id=CVE-2026-49857),
   auth-fetch-mcp before 3.0.2: its private-address blocklist missed an IPv4-mapped IPv6 loopback
   address.
+* **Internal addresses written in IPv6:** IPv4-mapped metadata addresses
+  ([CVE-2026-42449](https://www.cve.org/CVERecord?id=CVE-2026-42449)), 6to4, NAT64 and site-local
+  addresses ([CVE-2026-44430](https://www.cve.org/CVERecord?id=CVE-2026-44430)), IPv4-compatible
+  addresses, `64:ff9b:1::/48` and ISATAP (pydantic-ai,
+  [GHSA-cg7w-rg45-pc59](https://github.com/advisories/GHSA-cg7w-rg45-pc59), CVE-2026-48782) got
+  past checks of resolved addresses that only knew the IPv4 forms.
 
 The advisories' common lesson is to parse first, then compare hostnames exactly or by a dot-bounded
-suffix. URLFence does that, with theorems about what it decides.
-[`UrlFence/Examples.lean`](UrlFence/Examples.lean) runs inputs in the style of these bugs at build
-time. (It does not reproduce the original programs.)
+suffix, and to decide on the address, in every form that carries one. URLFence does that, with
+theorems about what it decides. [`UrlFence/Examples.lean`](UrlFence/Examples.lean) and
+[`UrlFence/Addr/Examples.lean`](UrlFence/Addr/Examples.lean) run inputs in the style of these bugs
+at build time. (They do not reproduce the original programs.)
 
 ## The rules
 
@@ -73,6 +83,93 @@ not match `example.com` (add that pattern too), `attacker-example.com` or `examp
 URL is **allowed** when it is accepted, its scheme is allowed (`https` only, unless `--scheme` says
 otherwise), its host matches an allowed pattern, and it matches no denied pattern.
 
+## Resolved addresses
+
+An allowed name can resolve to an internal address. `urlfence addr` checks resolved addresses
+against the IANA [IPv4](https://www.iana.org/assignments/iana-ipv4-special-registry/) and
+[IPv6](https://www.iana.org/assignments/iana-ipv6-special-registry/) Special-Purpose Address
+Registries, as last updated on 2025-10-09 (the CSV files are kept in [`data/`](data), with their
+source and the steps to update them):
+
+```console
+$ urlfence addr -- 8.8.8.8 ::ffff:127.0.0.1 2002:a9fe:a9fe::1 fe80::1%eth0
+{"input":"8.8.8.8","decision":"allow","family":"ipv4","addr":"8.8.8.8"}
+{"input":"::ffff:127.0.0.1","decision":"deny","family":"ipv6","addr":"::ffff:7f00:1","reason":"mapped 127.0.0.1: registry 127.0.0.0/8 Loopback"}
+{"input":"2002:a9fe:a9fe::1","decision":"deny","family":"ipv6","addr":"2002:a9fe:a9fe::1","reason":"registry 2002::/16 6to4"}
+{"input":"fe80::1%eth0","decision":"reject","reason":"parse"}
+$ urlfence addr --nat64 64:ff9b::/96 -- 64:ff9b::808:808 64:ff9b::a9fe:a9fe
+{"input":"64:ff9b::808:808","decision":"allow","family":"ipv6","addr":"64:ff9b::808:808"}
+{"input":"64:ff9b::a9fe:a9fe","decision":"deny","family":"ipv6","addr":"64:ff9b::a9fe:a9fe","reason":"nat64-embedded 169.254.169.254: registry 169.254.0.0/16 Link Local"}
+```
+
+**Text forms.** An IPv4 address is four decimal parts `0` to `255` without leading zeros, as in a
+URL host. An IPv6 address is in one of the forms of RFC 4291, section 2.2: eight groups of 1 to 4
+hex digits in either case, at most one `::`, and possibly a dotted quad for the last 32 bits. Zone
+IDs (`%eth0`), brackets, prefix lengths and spaces are refused (`reject`, reason `parse`). The
+address is printed in the form of RFC 5952 (lowercase, no leading zeros, `::` for the first longest
+run of two or more zero groups), without its section 5 mixed form: `::ffff:127.0.0.1` prints as
+`::ffff:7f00:1`.
+
+**The policy.**
+
+* An IPv4 address is denied if it is in a registry row whose "Globally Reachable" value is not
+  `True` (`False`, `N/A`, or empty for a terminated allocation), in 224.0.0.0/4 (multicast, which
+  is not in the registry), or in a `--deny` prefix.
+* An IPv4-mapped address (`::ffff:0:0/96`) gets the decision of the IPv4 address it carries, and so
+  does an address in a NAT64 prefix given with `--nat64`.
+* Any other IPv6 address is allowed only inside 2000::/3, outside every registry row that is not
+  globally reachable and every `--deny` prefix, and only if, when its interface identifier is an
+  ISATAP one (`0000:5efe` with any u and g bits), the IPv4 address in it is allowed. So everything
+  outside 2000::/3 is denied: `::/96` (IPv4-compatible), `64:ff9b:1::/48`, `100::/64`, `5f00::/16`,
+  `fc00::/7`, `fe80::/10`, `fec0::/10`, `ff00::/8` and the rest.
+* A `--deny` prefix applies to every address of its family, including the IPv4 address inside an
+  IPv6 one. A prefix is `ADDRESS/LENGTH` with a length of at most 32 or 128, written without
+  leading zeros, and no address bits set after it; anything else is a usage error.
+* The `reason` of a denial names the first rule that denies it: `registry <block> <name>`,
+  `multicast 224.0.0.0/4`, `outside 2000::/3`, `deny <prefix>`, or `mapped <ipv4>: …`,
+  `nat64-embedded <ipv4>: …` and `isatap <ipv4>: …` followed by the reason for that IPv4 address.
+
+**Deliberately stricter than the registries.** A row that is not globally reachable denies all of
+its block, even where a more specific row says `True`:
+
+* all of 192.0.0.0/24, including 192.0.0.9 (PCP anycast) and 192.0.0.10 (TURN anycast);
+* all of 2001::/23, including Teredo (2001::/32, `N/A`) and the rows marked `True`: 2001:1::1 to
+  2001:1::3 (PCP, TURN and DNS-SD SRP anycast), 2001:3::/32 (AMT), 2001:4:112::/48 (AS112),
+  2001:20::/28 (ORCHIDv2) and 2001:30::/28 (DETs);
+* all of 6to4 (2002::/16, `N/A`), whatever IPv4 address it carries, and the terminated rows
+  192.88.99.0/24 and 2001:10::/28;
+* `64:ff9b::/96` (`True`) unless it is given with `--nat64`; then the IPv4 address inside decides.
+
+The anycast addresses are answered by the local gateway or border routers, and 6to4 and Teredo
+depend on relays the caller does not control: none of them is a destination an agent's request
+should reach.
+
+**NAT64.** `--nat64` takes a /96 (no bits set after it) that URLFence honours: `64:ff9b::/96`, or a
+/96 inside 2000::/3 that has no address in common with a registry row that is not globally
+reachable. Anything else, such as the RFC 8215 local-use prefix `64:ff9b:1::/96`, a ULA or a
+documentation prefix, is a usage error (exit status 2) rather than a prefix that would be silently
+ignored. Configuring NAT64 prefixes allows nothing beyond `64:ff9b::/96` with an allowed IPv4 address
+inside, or what is allowed without them (`allows_nat64_wellKnown`).
+
+**What is not decoded.** Only IPv4-mapped addresses, the configured /96 NAT64 prefixes and ISATAP
+identifiers are decoded; 6to4 and Teredo are denied. An address inside 2000::/3 that carries an
+IPv4 address in another way is decided as a plain global address: a network-specific NAT64 prefix
+that is not configured (`2a00:1450:64::a00:1`, carrying 10.0.0.1, is allowed; RFC 6052 forbids
+non-global IPv4 addresses only in the well-known prefix), the RFC 6052 prefix lengths 32 to 64,
+6rd, MAP-E and MAP-T, and SIIT-EAM. A network that uses them must deny their prefixes with
+`--deny`.
+
+**What the registries do not know.** Internal services on global addresses are allowed unless you
+deny them: a cloud provider's host endpoints (Azure's 168.63.129.16, for example) and your own
+public IPv4 and IPv6 ranges. The tables are a snapshot: a block that IANA later adds as not globally
+reachable is allowed until they are updated ([`data/README.md`](data/README.md)).
+
+**Together with the URL check.** Check the URL with `urlfence check`, resolve its host, check every
+address with `urlfence addr`, refuse if any is denied, and connect to a checked address without
+resolving the name again, keeping the URL's host for the `Host` header and the TLS server name. Do
+it again on every redirect. [`examples/guarded_fetch.py`](examples/guarded_fetch.py) does this by
+default (see [Usage](#usage)).
+
 ## What is proven
 
 The theorems are in [`UrlFence/`](UrlFence), checked by Lean v4.35.0, with no `sorry` and only
@@ -97,11 +194,33 @@ below; see [How it is checked](#how-it-is-checked).
 | `parsePattern_sub_valid` | A parsed subdomain pattern is a valid domain. |
 | `domainOk_noDot`, `join_split`, `split_join`, `split_append_sep`, `join_append` | Splitting at `.` and joining are inverse, and distribute as expected. |
 
+For resolved addresses ([`UrlFence/Addr/`](UrlFence/Addr), namespace `UrlFence.Addr`):
+
+| Theorem | Statement |
+| --- | --- |
+| `check_allow_iff`, `allows4_iff`, `allows6_iff`, `embeds_iff`, `nat64Ok_iff` | `check` allows an address **iff** its text parses to it and the policy above allows it, stated rule by rule. |
+| `registry4_denied`, `registry6_denied`, `multicast4_denied`, `outside_global_denied` | Every address in a registry row that is not globally reachable is denied (for IPv6, except in `::ffff:0:0/96`, which is decided as IPv4-mapped), and so is every IPv4 multicast address, and every IPv6 address outside 2000::/3 that carries no IPv4 address. |
+| `mapped_denied`, `mapped_allows_iff`, `nat64_denied`, `nat64_allows_iff`, `isatap_denied` | The IPv4-mapped, NAT64 (in any configured prefix) and ISATAP (any prefix, any u and g bits) addresses of a denied IPv4 address are denied; a mapped or honoured NAT64 address is allowed **iff** its IPv4 address is and no denied IPv6 prefix contains it. |
+| `sixToFour_denied`, `teredo_denied` | Every 6to4 and every Teredo address is denied. |
+| `allows_nat64_wellKnown` | Configuring NAT64 prefixes allows nothing beyond `64:ff9b::/96` with an allowed IPv4 address inside, or what is allowed without them. |
+| `allows_of_add_deny4`, `allows_of_add_deny6` | Denying another prefix never allows more. |
+| `explain_eq_none_iff` | A denial reason exists **iff** the address is denied. |
+| `parse_render`, `render6_canonical`, `hex16_canonical` | A printed address parses back to itself, and the IPv6 form is that of RFC 5952, section 4. |
+| `parse4_eq_some_iff`, `parse4_isSome_iff` | An IPv4 text is read as `v` **iff** it is the printed form of `v`, and is accepted **iff** the URL host parser reads it as an IPv4 address. |
+| `Prefix.contains_iff_getMsbD`, `Prefix.contains_iff`, `contains_iff_range4`, `contains_iff_range6`, `ipv4Registry_blocks`, `ipv6Registry_blocks` | Prefix membership is equality of the first bits; every registry block is a CIDR block, so membership is a range of addresses. The last two pin the registry tables. |
+| `parsePrefix_v4`, `parsePrefix_v6` | A parsed `--deny` or `--nat64` prefix is a CIDR block. |
+
 ### Where the proofs end
 
 The theorems say what URLFence's own parser and matcher do, and pin the reading of an accepted URL
 (the host is exactly the text between `//` and the first `:`, `/`, `?`, `#`). **That a WHATWG URL
 parser (what browsers and Node use) reads every accepted URL the same way is tested, not proven.**
+
+For addresses, **that the Lean tables are the IANA registries is checked by a script, not proven**
+([`scripts/check_registry.py`](scripts/check_registry.py) compares them with the CSV files), and
+**that URLFence reads IPv6 text as `inet_pton` does is tested, not proven** (for IPv4 the reading is
+proven: `parse4_eq_some_iff`). What the network does with an allowed address, a NAT64 gateway
+included, is outside the model.
 
 The CLI ([`Main.lean`](Main.lean)) calls the library directly. Its argument parsing, stdin decoding
 and JSON output are ordinary code, covered by tests.
@@ -191,23 +310,55 @@ and JSON output are ordinary code, covered by tests.
   `urlsplit`, `urllib.request` and curl; urllib3 and requests run there only if the runner has
   them. Run `python3 tests/compat.py` for the full corpus. These are tests on this corpus and
   these client versions, not proofs.
-* `tests/test_guarded_fetch.py` runs the example against the real binary and an HTTP proxy on
-  127.0.0.1 that stands in for the web: a redirect to another host, or to a URL with userinfo, is
-  refused before it is requested, and the body is cut at `max_bytes`. Unusable answers from the
-  binary, simulated by replacing `subprocess.run`, refuse.
-* `tests/mutants.py` plants 15 plausible bugs, one at a time, and requires each one to be caught.
-  They include the CVE-style prefix and suffix mistakes, a wrong authority boundary, and accepting
-  octal IPv4 parts. So far every one fails the build, and the script names the file: a theorem or a
-  build-time example. Some fail only because a proof script no longer fits the changed code, not
-  because a statement became false. Dropping the userinfo check or the percent check changes only
-  the reason for a rejection, since the host grammar refuses those characters anyway. Dropping the
-  backslash check also lets a backslash through in the path, query or fragment, with the host
-  unchanged.
+* [`scripts/check_registry.py`](scripts/check_registry.py) (in CI and `scripts/reproduce.sh`)
+  compares the registry tables in [`UrlFence/Addr/Registry.lean`](UrlFence/Addr/Registry.lean) with
+  the IANA CSV files, row by row: each block's value and length (read with Python's `ipaddress`),
+  the "Globally Reachable" value, the name, and the block as URLFence prints it. It also checks the
+  files' SHA-256.
+* [`tests/test_addr.py`](tests/test_addr.py) checks `urlfence addr`:
+  * its parser against `socket.inet_pton` and `ipaddress` on 50,000 deterministic strings (address
+    forms, mutations of them, random strings). Every accepted string must give the same bytes as
+    both and print as `ipaddress` prints it; every refused string must be refused by `inet_pton`
+    too (`ipaddress` also accepts zone IDs). With Python 3.12.3: 25,889 accepted, 24,111 refused
+    (counted by category: zone IDs, brackets, IPv4 not in four parts, leading zeros, …), no
+    difference;
+  * its decisions against `ipaddress.is_global` on 333 addresses: the edges of every registry block,
+    of 2000::/3 and of 224.0.0.0/4, and the mapped, IPv4-compatible, NAT64, 6to4, Teredo, ISATAP and
+    site-local forms of nine IPv4 addresses. Every difference must match an entry of a list with
+    its reason, all of them addresses URLFence denies and `is_global` calls global: the blocks
+    denied as a whole above, the rows Python 3.12.3 does not know yet (3fff::/20, 5f00::/16,
+    100:0:0:1::/64), multicast, space outside 2000::/3, ISATAP, and mapped addresses of IPv4
+    addresses that are not private but not globally reachable either (100.64.0.0/10). There are
+    105; `python3 tests/test_addr.py --table` prints them;
+  * the CLI's contract: fields, exit status, reasons, NAT64 and prefix usage errors, stdin
+    encoding and ASCII output.
+* `tests/test_guarded_fetch.py` runs the example against the real binary. Unpinned, an HTTP proxy on
+  127.0.0.1 stands in for the web: a redirect to another host, or to a URL with userinfo, is
+  refused before it is requested, and the body is cut at `max_bytes`. Pinned, `getaddrinfo` is
+  replaced by a table of answers and the example's `open_socket` by a function that records where
+  the fetch connects and sends the connection to an origin fixture on 127.0.0.1 (the answers that
+  should succeed are public addresses, so the policy needs no exception for the fixture). Loopback,
+  private, metadata, mapped, IPv4-compatible, NAT64, 6to4, Teredo, ISATAP, ULA, link-local and
+  site-local answers, alone or mixed with a public one, are refused with no connection; an answer
+  that turns from public to loopback is refused on the next hop; the request keeps the URL's host
+  in `Host` and, for https, as the TLS server name. Unusable answers from the binary, simulated by
+  replacing `subprocess.run`, refuse.
+* `tests/mutants.py` plants 23 plausible bugs, one at a time, and requires each one to be caught.
+  They include the CVE-style prefix and suffix mistakes, a wrong authority boundary, accepting
+  octal IPv4 parts, and for addresses: no IPv4-mapped decoding, the IPv4 address taken at the wrong
+  offset, the 6to4 row dropped, a prefix length off by one, the ISATAP `0200:5efe` form missed,
+  multicast allowed, `64:ff9b::/96` treated as global, and the CLI ignoring a NAT64 prefix that
+  URLFence would not honour. So far every one but the last fails the build, and the script names
+  the file: a theorem or a build-time example; the last fails `tests/test_addr.py`. Some fail only
+  because a proof script no longer fits the changed code, not because a statement became false.
+  Dropping the userinfo check or the percent check changes only the reason for a rejection, since
+  the host grammar refuses those characters anyway. Dropping the backslash check also lets a
+  backslash through in the path, query or fragment, with the host unchanged.
 
 [`scripts/reproduce.sh`](scripts/reproduce.sh) runs all of this from a fresh clone of the current
-commit in a temporary directory: the pins, the build, the audit, the tests, the client comparison
-on the full corpus and the mutation check, and prints the binary's SHA-256. It takes about a minute
-and a half, and, like CI, fails if node or curl is missing.
+commit in a temporary directory: the pins, the build, the audit, the registry check, the tests, the
+client comparison on the full corpus and the mutation check, and prints the binary's SHA-256. It
+takes about two and a half minutes, and, like CI, fails if node or curl is missing.
 
 ## Usage
 
@@ -220,6 +371,7 @@ lake build
 
 ```
 urlfence check --allow PATTERN ... [--deny PATTERN ...] [--scheme http|https ...] [--stdin] [-- URL ...]
+urlfence addr [--nat64 PREFIX/96 ...] [--deny PREFIX ...] [--stdin] [-- ADDRESS ...]
 ```
 
 * URLs go after `--`, or one per line on stdin with `--stdin`. Stdin is read whole before the
@@ -233,9 +385,11 @@ urlfence check --allow PATTERN ... [--deny PATTERN ...] [--scheme http|https ...
   only if it has exactly one result line per input and the exit status matches the decisions;
   anything else is a failure, not an answer.
 * One ASCII JSON object per URL: `decision` is `allow`, `deny` or `reject`, with `scheme`, `host` and
-  `port`, or a `reason`.
-* Exit status: 0 if at least one URL was checked and all are allowed, 1 otherwise, and 2 for a usage
-  error, including an invalid pattern or no URLs.
+  `port`, or a `reason`. For `addr`, one per address, with `family` (`ipv4` or `ipv6`) and `addr`
+  (the printed form), and a `reason` for `deny` and `reject`.
+* Exit status: 0 if at least one URL or address was checked and all are allowed, 1 otherwise, and 2
+  for a usage error, including an invalid pattern or prefix, a NAT64 prefix URLFence would not
+  honour, or nothing to check.
 * **Send the request to exactly the URL you checked.** If you rebuild it, rebuild it from `scheme`,
   `host` and `port`, never from your own parse of the input.
 * **Check every redirect.** A client that follows `Location` by itself sends the next request
@@ -244,23 +398,49 @@ urlfence check --allow PATTERN ... [--deny PATTERN ...] [--scheme http|https ...
 [`examples/guarded_fetch.py`](examples/guarded_fetch.py) is an example of all of this in Python, to
 adapt, not a hardened client: `guarded_fetch(url, allow=[...])` checks the URL, refuses unless
 URLFence's answer is one JSON object for exactly that URL with a matching exit status, requests
-(GET) exactly the checked string, and checks each redirect target before following it. It returns
+(GET) exactly the checked URL, and checks each redirect target before following it. It returns
 `(status, body, hops)` for the last response, whatever its status, or raises `Refused` (refused,
-or the request failed). It does nothing about DNS, the port or the path, or what a proxy or the
-server does with the URL (see below). It bounds the body (`max_bytes`) and the number of
-redirects, but `TIMEOUT` applies to each socket operation, not to the whole fetch: a server that
-sends slowly can hold a fetch for much longer than `TIMEOUT`.
+or the request failed).
 
-From Lean, build a policy with `UrlFence.Policy.make` and call `Policy.checkString`.
+By default (`pin=True`) it also pins the connection: on every hop it resolves the host once, runs
+`urlfence addr` on every answer (`deny_addr` and `nat64` are passed as `--deny` and `--nat64`),
+refuses before connecting if any answer is denied, and connects to a checked address itself, so the
+name is not resolved again; the `Host` header and, for https, the TLS server name and the name the
+certificate must match stay the URL's host. A proxy resolves names itself, so with `pin=True` a
+`proxies` argument is an error, and a proxy set in the environment for the scheme refuses
+(`no_proxy` is honoured). `pin=False` requests the URL through urllib (and any proxy) without
+checking addresses; the proxy must then enforce its own address policy. Pinning is the default
+because it closes the gap the URL check leaves open, at the cost of not working through a proxy.
+
+It does nothing about the port or the path, or what a proxy or the server does with the request
+(see below). It bounds the body (`max_bytes`) and the number of redirects, but `TIMEOUT` applies to
+each socket operation, not to the whole fetch: a server that sends slowly can hold a fetch for much
+longer than `TIMEOUT`.
+
+From Lean, build a policy with `UrlFence.Policy.make` and call `Policy.checkString`; for addresses,
+build a `UrlFence.Addr.Config` and call `Config.checkString`.
 
 ## What it does not cover
 
-* **DNS.** An allowed name can resolve to a private or loopback address, or change between the
-  check and the connection (rebinding). Pin the resolved address, or check it, at connect time.
+* **DNS.** `urlfence check` decides on the name only. An allowed name can resolve to a private or
+  loopback address, or change between the check and the connection (rebinding): check every
+  resolved address with `urlfence addr` and pin the connection to a checked one, as the example
+  does. An unpinned connection (one that resolves the name again, or goes through a proxy) is not
+  covered.
+* **Addresses the registries cannot tell apart.** `urlfence addr` knows the IANA special-purpose
+  blocks, not your network: internal services on global addresses (a cloud provider's host
+  endpoints, your own public ranges) are allowed unless you `--deny` them, and so are IPv4
+  addresses embedded in ways it does not decode (network-specific NAT64 prefixes you did not
+  configure, the RFC 6052 lengths other than /96, 6rd, MAP-E/T, SIIT-EAM). What a NAT64 gateway or
+  a proxy then does with an address is outside its view. The registry tables need re-transcription
+  when IANA updates them.
+* **Other protocols.** The address check is for TCP connections made by the caller; UDP and QUIC
+  are not pinned by the example, and neither are ports.
 * **Redirects.** A request to an allowed URL can be redirected anywhere. Re-check every hop, or
   turn redirects off.
 * **What the server does.** Open redirects and proxies on an allowed host are out of scope.
-* **IPv6 literals and non-ASCII (IDNA) hosts** are refused, not supported.
+* **IPv6 literals and non-ASCII (IDNA) hosts** are refused in URLs, not supported (`urlfence addr`
+  takes IPv6 addresses, without brackets).
 * **Browser leniency.** Many URLs a browser accepts are refused here: uppercase letters, `https:/x`,
   a trailing dot, short IPv4 forms. Normalise them yourself only if you then check the normalised
   string.
