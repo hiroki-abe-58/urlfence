@@ -39,12 +39,17 @@ Checks on URLs keep failing in the same few ways, including in AI-agent tools:
 * **IP literals in unexpected forms:** [CVE-2026-49857](https://www.cve.org/CVERecord?id=CVE-2026-49857),
   auth-fetch-mcp before 3.0.2: its private-address blocklist missed an IPv4-mapped IPv6 loopback
   address.
-* **Internal addresses written in IPv6:** IPv4-mapped metadata addresses
-  ([CVE-2026-42449](https://www.cve.org/CVERecord?id=CVE-2026-42449)), 6to4, NAT64 and site-local
-  addresses ([CVE-2026-44430](https://www.cve.org/CVERecord?id=CVE-2026-44430)), IPv4-compatible
-  addresses, `64:ff9b:1::/48` and ISATAP (pydantic-ai,
-  [GHSA-cg7w-rg45-pc59](https://github.com/advisories/GHSA-cg7w-rg45-pc59), CVE-2026-48782) got
-  past checks of resolved addresses that only knew the IPv4 forms.
+* **Internal addresses written in IPv6:**
+  * [CVE-2026-42449](https://www.cve.org/CVERecord?id=CVE-2026-42449), n8n-mcp 2.47.4 to 2.47.13:
+    a URL validator with no IPv6 checks let IPv4-mapped addresses such as
+    `[::ffff:169.254.169.254]` through;
+  * [CVE-2026-44430](https://www.cve.org/CVERecord?id=CVE-2026-44430), MCP Registry before 1.7.7:
+    its blocklist covered no 6to4, NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`) or site-local
+    (`fec0::/10`) addresses;
+  * [GHSA-cg7w-rg45-pc59](https://github.com/advisories/GHSA-cg7w-rg45-pc59) (CVE-2026-48782),
+    pydantic-ai before 1.102.0 (before 2.0.0b3 on the 2.0 line): an earlier fix decoded
+    IPv4-mapped, 6to4 and `64:ff9b::/96` addresses, but not IPv4-compatible ones, `64:ff9b:1::/48`,
+    other NAT64 prefixes or ISATAP.
 
 The advisories' common lesson is to parse first, then compare hostnames exactly or by a dot-bounded
 suffix, and to decide on the address, in every form that carries one. URLFence does that, with

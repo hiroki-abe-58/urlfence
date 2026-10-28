@@ -3,17 +3,21 @@ import UrlFence.Addr.Explain
 /-!
 # Address examples, checked at build time
 
-The first groups follow published bugs in checks of resolved addresses, where an IPv4 address
-written in IPv6 got past a check of the IPv4 forms:
+The first groups follow published bugs in address checks (of IP literals in URLs or of resolved
+addresses), where an internal address written in an IPv6 form got past a check that did not decode
+or deny that form:
 
 * CVE-2026-49857 (auth-fetch-mcp before 3.0.2), <https://www.cve.org/CVERecord?id=CVE-2026-49857>:
   IPv4-mapped loopback `::ffff:7f00:1`;
-* CVE-2026-42449, <https://www.cve.org/CVERecord?id=CVE-2026-42449>: IPv4-mapped metadata address
-  `[::ffff:169.254.169.254]`;
-* CVE-2026-44430, <https://www.cve.org/CVERecord?id=CVE-2026-44430>: 6to4 (`2002::/16`), NAT64
-  (`64:ff9b::/96`, `64:ff9b:1::/48`) and site-local (`fec0::/10`) addresses were not denied;
-* CVE-2026-48782 (pydantic-ai), <https://github.com/advisories/GHSA-cg7w-rg45-pc59>:
-  IPv4-compatible `::a.b.c.d`, `64:ff9b:1::/48` and ISATAP.
+* CVE-2026-42449 (n8n-mcp 2.47.4 to 2.47.13), <https://www.cve.org/CVERecord?id=CVE-2026-42449>:
+  IPv4-mapped metadata address `[::ffff:169.254.169.254]`;
+* CVE-2026-44430 (MCP Registry before 1.7.7), <https://www.cve.org/CVERecord?id=CVE-2026-44430>:
+  6to4 (`2002::/16`), NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`) and site-local (`fec0::/10`)
+  addresses were not denied;
+* CVE-2026-48782 (pydantic-ai before 1.102.0, and before 2.0.0b3 on the 2.0 line),
+  <https://github.com/advisories/GHSA-cg7w-rg45-pc59>:
+  IPv4-compatible `::a.b.c.d`, `64:ff9b:1::/48`, other NAT64 prefixes and ISATAP, after an
+  earlier fix had added IPv4-mapped, 6to4 and `64:ff9b::/96`.
 
 They show what `Config.check` decides for those inputs. They do not reproduce the original
 programs. The cloud metadata addresses follow: 169.254.169.254, 100.100.100.200, 192.0.0.192 and
