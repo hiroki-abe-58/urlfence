@@ -17,6 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 MATCH = "  | .sub d, .domain ls => !d.isEmpty && decide (d.length < ls.length) && d.isSuffixOf ls\n"
 NODE_EXAMPLE = "examples/guarded_fetch.mjs"
+PY_EXAMPLE = "examples/guarded_fetch.py"
 CHECK = "    if pol.schemes.contains u.scheme && pol.allow.any (·.matches u.host) && !pol.deny.any (·.matches u.host)\n"
 
 # name -> list of (file, old text, new text)
@@ -92,6 +93,10 @@ MUTANTS = {
     "N3 Node example: an answer's addr not compared with the address checked": [
         (NODE_EXAMPLE, "    if (addrKey(a.addr) === null || addrKey(a.addr) !== addrKey(a.input)) {",
          "    if (addrKey(a.addr) === null) {")],
+    # The Python example (examples/guarded_fetch.py), for tests/test_guarded_fetch.py.
+    "P1 Python example: a body shorter than its Content-Length returned as if whole": [
+        (PY_EXAMPLE, "    if left and len(body) != max_bytes:  # also for max_bytes None or negative, which read it all\n"
+         "        raise http.client.IncompleteRead(body, left)\n", "")],
 }
 
 

@@ -10,14 +10,18 @@ machine.
   instead. The answers are public addresses where a fetch should succeed, so URLFence's address
   policy needs no exception for the fixture: only this test function knows that the connection
   ends on 127.0.0.1. The fixture records what each connection brings first (an HTTP request head,
-  or a TLS ClientHello, answered with a fatal alert).
+  or a TLS ClientHello, answered with a fatal alert). For one https test, an origin with a
+  throwaway self-signed certificate (made with openssl for the run) completes the handshake.
 
 Unusable answers from the binary are simulated by replacing `subprocess.run`."""
 import os
+import shutil
 import socket
 import socketserver
+import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 import urllib.request
@@ -38,10 +42,41 @@ PAGES = {
     ("docs.example.com", "/loop"): (302, {"Location": "/loop"}, b""),
     ("docs.example.com", "/broken"): (404, {"Transfer-Encoding": "chunked"}, b"zz\r\n"),
     ("docs.example.com", "/large"): (200, {}, b"z" * 50_000),
+    # Content-Length says 100 bytes; the fixtures send these and close the connection.
+    ("docs.example.com", "/short"): (200, {"Content-Length": "100"}, b"0123456789"),
+    ("docs.example.com", "/short404"): (404, {"Content-Length": "100"}, b"gone"),
+    ("docs.example.com", "/short302"): (302, {"Location": "/guide", "Content-Length": "100"}, b"ab"),
+    # A 304 has no body, whatever Content-Length says.
+    ("docs.example.com", "/not-modified"): (304, {"Content-Length": "100"}, b""),
 }
 for code in (301, 302, 303, 307, 308):
     PAGES[("docs.example.com", f"/leave{code}")] = (code, {"Location": "http://evil.example.net/collect"}, b"")
 ALLOW = dict(allow=["docs.example.com"], schemes=("http",))
+# Bodies cut short of their Content-Length, which refuse, and answers that are not cut short, which
+# do not: a body cut at max_bytes (also at 0), a 304 and a complete 404.
+SHORT = ("/short", "/short404", "/short302")
+# max_bytes values that read the whole body; a short one still refuses.
+READ_ALL = ({"max_bytes": None}, {"max_bytes": -1})
+NOT_SHORT = (("/short", {"max_bytes": 5}, (200, b"01234")), ("/short", {"max_bytes": 0}, (200, b"")),
+             ("/not-modified", {}, (304, b"")), ("/missing", {}, (404, b"not found")))
+OPENSSL = shutil.which("openssl")
+
+
+def throwaway_cert(test, san):
+    """(certificate, key) files of a self-signed certificate for `san`, made with openssl for `test`
+    and removed after it. Without openssl the test is skipped, unless URLFENCE_REQUIRE (a
+    comma-separated list) names it, as in CI: then it fails."""
+    if OPENSSL is None:
+        if "openssl" in os.environ.get("URLFENCE_REQUIRE", "").split(","):
+            raise AssertionError("openssl is not installed, and URLFENCE_REQUIRE requires it")
+        raise unittest.SkipTest("openssl is not installed")
+    d = tempfile.mkdtemp()
+    test.addCleanup(shutil.rmtree, d)
+    cert, key = os.path.join(d, "cert.pem"), os.path.join(d, "key.pem")
+    subprocess.run([OPENSSL, "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes",
+                    "-days", "1", "-subj", "/CN=urlfence test", "-addext", "subjectAltName=" + san,
+                    "-keyout", key, "-out", cert], check=True, capture_output=True)
+    return cert, key
 
 
 class Web:
@@ -61,7 +96,7 @@ class Web:
                 auth, _, path = target.removeprefix("http://").partition("/")
                 status, headers, body = PAGES.get((auth, "/" + path.split("?")[0]), (404, {}, b"not found"))
                 head = f"HTTP/1.1 {status} X\r\nConnection: close\r\n"
-                if "Transfer-Encoding" not in headers:
+                if "Transfer-Encoding" not in headers and "Content-Length" not in headers:
                     head += f"Content-Length: {len(body)}\r\n"
                 head += "".join(f"{k}: {v}\r\n" for k, v in headers.items())
                 self.wfile.write(head.encode() + b"\r\n" + body)
@@ -154,27 +189,51 @@ class GuardedFetch(unittest.TestCase):
         status, body, _ = self.fetch("http://docs.example.com/large", max_bytes=1000)
         self.assertEqual((status, body), (200, b"z" * 1000))
 
+    def test_a_body_shorter_than_its_content_length_refuses(self):
+        for path in SHORT:
+            with self.subTest(path=path):
+                with self.assertRaises(gf.Refused) as cm:
+                    self.fetch("http://docs.example.com" + path)
+                self.assertIn("request failed", str(cm.exception))
+        for kw in READ_ALL:
+            with self.subTest(**kw):
+                with self.assertRaises(gf.Refused):
+                    self.fetch("http://docs.example.com/short", **kw)
+        for path, kw, answer in NOT_SHORT:
+            with self.subTest(path=path, **kw):
+                self.assertEqual(self.fetch("http://docs.example.com" + path, **kw)[:2], answer)
+
 
 class Origin:
     """The stand-in origin servers for pinned fetches: one TCP listener on 127.0.0.1 that records the
     first bytes of each connection, then answers an HTTP request from PAGES by its Host header (port
-    removed) and path, or a TLS ClientHello with a fatal alert."""
+    removed) and path, or a TLS ClientHello with a fatal alert. With `cert` (certificate and key
+    files), it completes TLS handshakes with that certificate instead, records the request that
+    arrives over TLS and answers it from PAGES, then closes the connection without a TLS
+    close_notify."""
 
-    def __init__(self):
+    def __init__(self, cert=None):
         self.records = []
         origin = self
+        context = None
+        if cert is not None:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(*cert)
 
         class Handler(socketserver.BaseRequestHandler):
             def handle(self):
-                self.request.settimeout(5)
+                conn = self.request
+                conn.settimeout(5)
                 data = b""
                 try:
+                    if context is not None:
+                        conn = context.wrap_socket(conn, server_side=True)
                     while len(data) < 65536 and not compat.message_complete(data):
-                        chunk = self.request.recv(4096)
+                        chunk = conn.recv(4096)
                         if not chunk:
                             break
                         data += chunk
-                except OSError:
+                except OSError:  # ssl.SSLError included
                     pass
                 origin.records.append(data)
                 if data[:1] == b"\x16":
@@ -184,18 +243,26 @@ class Origin:
                     path = (lines[0].split(" ") + ["", ""])[1].split("?")[0]
                     host = (compat.header(lines, "Host") or "").rsplit(":", 1)[0]
                     status, headers, body = PAGES.get((host, path), (404, {}, b"not found"))
-                    head = f"HTTP/1.1 {status} X\r\nConnection: close\r\nContent-Length: {len(body)}\r\n"
+                    head = f"HTTP/1.1 {status} X\r\nConnection: close\r\n"
+                    if "Content-Length" not in headers:
+                        head += f"Content-Length: {len(body)}\r\n"
                     head += "".join(f"{k}: {v}\r\n" for k, v in headers.items())
                     answer = head.encode() + b"\r\n" + body
                 try:
-                    self.request.sendall(answer)
+                    conn.sendall(answer)
                 except OSError:
                     pass
+                if conn is not self.request:
+                    conn.close()  # without unwrap(), so no close_notify: the TLS stream just ends
 
         self.server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
         self.port = self.server.server_address[1]
         threading.Thread(target=self.server.serve_forever, args=(0.01,), daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
 
     def heads(self):
         """The request line and Host header of each HTTP request so far."""
@@ -240,8 +307,7 @@ class Pinned(unittest.TestCase):
             self.addCleanup(patch.stop)
 
     def tearDown(self):
-        self.origin.server.shutdown()
-        self.origin.server.server_close()
+        self.origin.close()
 
     def fetch(self, url, answers, **kw):
         self.answers.update({h: [list(a) for a in seq] for h, seq in answers.items()})
@@ -302,6 +368,33 @@ class Pinned(unittest.TestCase):
         self.assertEqual(hops[1]["addrs"][0]["decision"], "deny")
         self.assertEqual(self.connects, [("8.8.8.8", 80)])
         self.assertEqual(self.lookups, [("docs.example.com", 80), ("docs.example.com", 80)])
+
+    def test_a_body_shorter_than_its_content_length_refuses(self):
+        answers = {"docs.example.com": [["8.8.8.8"]]}
+        for path in SHORT:
+            with self.subTest(path=path):
+                with self.assertRaises(gf.Refused) as cm:
+                    self.fetch("http://docs.example.com" + path, answers)
+                self.assertIn("request failed", str(cm.exception))
+        for kw in READ_ALL:
+            with self.subTest(**kw):
+                with self.assertRaises(gf.Refused):
+                    self.fetch("http://docs.example.com/short", answers, **kw)
+        for path, kw, answer in NOT_SHORT:
+            with self.subTest(path=path, **kw):
+                self.assertEqual(self.fetch("http://docs.example.com" + path, answers, **kw)[:2], answer)
+
+    def test_a_body_cut_short_over_https_refuses(self):
+        # The origin ends the TLS connection without close_notify, as an injected FIN would.
+        files = throwaway_cert(self, "DNS:docs.example.com")
+        self.origin.close()
+        self.origin = Origin(files)
+        https = dict(schemes=("https",), context=ssl.create_default_context(cafile=files[0]))
+        answers = {"docs.example.com": [["8.8.8.8"]]}
+        self.assertEqual(self.fetch("https://docs.example.com/guide", answers, **https)[:2], (200, b"the guide"))
+        with self.assertRaises(gf.Refused) as cm:
+            self.fetch("https://docs.example.com/short", answers, **https)
+        self.assertIn("request failed", str(cm.exception))
 
     def test_https_uses_the_url_host_as_server_name(self):
         with self.assertRaises(gf.Refused):  # the fixture ends the handshake with an alert

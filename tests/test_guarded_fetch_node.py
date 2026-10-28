@@ -52,6 +52,12 @@ PAGES = {
     ("docs.example.invalid", "/loop"): (302, {"Location": "/loop"}, b""),
     ("docs.example.invalid", "/broken"): (404, {"Transfer-Encoding": "chunked"}, b"zz\r\n"),
     ("docs.example.invalid", "/large"): (200, {}, b"z" * 50_000),
+    # Content-Length says 100 bytes; the fixture sends these and closes the connection.
+    ("docs.example.invalid", "/short"): (200, {"Content-Length": "100"}, b"0123456789"),
+    ("docs.example.invalid", "/short404"): (404, {"Content-Length": "100"}, b"gone"),
+    ("docs.example.invalid", "/short302"): (302, {"Location": "/guide", "Content-Length": "100"}, b"ab"),
+    # A 304 has no body, whatever Content-Length says.
+    ("docs.example.invalid", "/not-modified"): (304, {"Content-Length": "100"}, b""),
     ("docs.example.invalid", "/to-api"): (302, {"Location": "http://api.example.invalid/data"}, b""),
     ("api.example.invalid", "/data"): (200, {}, b"api data"),
     ("8.8.8.8", "/guide"): (200, {}, b"the guide by address"),
@@ -59,6 +65,11 @@ PAGES = {
 for code in (301, 302, 303, 307, 308):
     PAGES[("docs.example.invalid", f"/leave{code}")] = (code, {"Location": "http://evil.example.invalid/collect"}, b"")
 ALLOW = {"allow": ["docs.example.invalid"], "schemes": ["http"]}
+# As in tests/test_guarded_fetch.py: bodies cut short of their Content-Length, which refuse, and
+# answers that are not cut short, which do not.
+SHORT = ("/short", "/short404", "/short302")
+NOT_SHORT = (("/short", {"maxBytes": 5}, (200, b"01234")), ("/short", {"maxBytes": 0}, (200, b"")),
+             ("/not-modified", {}, (304, b"")), ("/missing", {}, (404, b"not found")))
 # A Location in raw forms (written with | for a backslash and _ for a tab): WHATWG removes the tab,
 # reads the backslashes as slashes, decodes and lowercases the host, and drops the default port and
 # the dot segments, giving http://docs.example.invalid/guide?q=1.
@@ -136,7 +147,7 @@ def respond(data):
     host = (compat.header(lines, "Host") or "").rsplit(":", 1)[0]
     status, headers, body = PAGES.get((host, path), (404, {}, b"not found"))
     head = f"HTTP/1.1 {status} X\r\nConnection: close\r\n"
-    if "Transfer-Encoding" not in headers:
+    if "Transfer-Encoding" not in headers and "Content-Length" not in headers:
         head += f"Content-Length: {len(body)}\r\n"
     head += "".join(f"{k}: {v}\r\n" for k, v in headers.items())
     return head.encode() + b"\r\n" + body
@@ -418,6 +429,15 @@ class Pinned(NodeTest):
         self.assertEqual([(ok(r)["status"], ok(r)["body"]) for r in rs],
                          [(200, b"z" * 1000), (200, b""), (200, b"z" * 50_000)])
 
+    def test_a_body_shorter_than_its_content_length_refuses(self):
+        answers = {"docs.example.invalid": [["8.8.8.8"]]}
+        rs = node([self.item("http://docs.example.invalid" + path, answers) for path in SHORT]
+                  + [self.item("http://docs.example.invalid" + path, answers, **kw) for path, kw, _ in NOT_SHORT])
+        for r in rs[:len(SHORT)]:
+            self.assertIn("request failed", refused(r)["message"])
+        self.assertEqual([(ok(r)["status"], ok(r)["body"]) for r in rs[len(SHORT):]],
+                         [answer for _, _, answer in NOT_SHORT])
+
 
 class Proxies(NodeTest):
     URL = "http://docs.example.invalid/guide"
@@ -533,6 +553,15 @@ class Certificates(NodeTest):
         for r in rs:
             self.assertRegex(refused(r)["message"], "self.signed")  # OpenSSL 1.1 has no hyphen
         self.assertEqual(o.records, [])
+
+    def test_a_body_cut_short_over_https_refuses(self):
+        # The origin ends the TLS connection without close_notify, as an injected FIN would.
+        o = self.origin_for("docs")
+        https = {"schemes": ["https"], "ca": self.certs["docs"][2], "origin": o.port}
+        rs = node([self.item("https://docs.example.invalid" + path, {"docs.example.invalid": [["8.8.8.8"]]}, **https)
+                   for path in ("/guide", "/short")])
+        self.assertEqual(ok(rs[0])["body"], b"the guide")
+        self.assertIn("request failed", refused(rs[1])["message"])
 
     def test_unpinned_requests_verify_the_certificate_too(self):
         docs, other = self.origin_for("docs"), self.origin_for("other")
