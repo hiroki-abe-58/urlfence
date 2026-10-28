@@ -255,6 +255,8 @@ and JSON output are ordinary code, covered by tests.
   CI checks the pins before anything builds. The audit does not protect its own inputs (this
   script, `scripts/Axioms.lean`, `scripts/statements.expected`, the CI workflow): a change to them
   shows in the diff, but whoever can change them can change the audit.
+* `tests/test_readme_theorems.py` checks that the theorem tables above name exactly the theorems
+  pinned in `scripts/statements.expected`; the audit does not read this README.
 * `tests/test_cases.py` runs fixed cases in the style of the advisories, and checks the CLI's
   contract.
 * `tests/test_whatwg.py` compares URLFence with Node's WHATWG `URL` on about 10,000 random and
