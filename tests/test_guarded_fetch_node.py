@@ -106,9 +106,10 @@ def need(tool, path):
         raise unittest.SkipTest(f"{tool} is not installed")
 
 
-def node(items, env=None, lookups=False):
+def node(items, env=None, lookups=False, violations=False):
     """Run the driver on these items and return their results. Nothing may connect anywhere but the
-    fixtures, and node itself may resolve nothing (unless `lookups`)."""
+    fixtures (unless `violations`: then what the driver refused is for the test to check), and node
+    itself may resolve nothing (unless `lookups`)."""
     full = {k: v for k, v in os.environ.items() if k not in CLEAN}
     full.update({"URLFENCE_BIN": BIN, **(env or {})})
     p = subprocess.run([NODE, DRIVER], input=json.dumps({"items": items}).encode(), capture_output=True, env=full,
@@ -117,9 +118,17 @@ def node(items, env=None, lookups=False):
         raise AssertionError(f"driver failed (exit {p.returncode}): {p.stderr.decode(errors='replace')}")
     results = json.loads(p.stdout.decode().splitlines()[-1])["results"]
     for r in results:
-        if r["violations"] or (r["lookups"] and not lookups):
+        if (r["violations"] and not violations) or (r["lookups"] and not lookups):
             raise AssertionError(f"connections {r['violations']}, lookups {r['lookups']}")
     return results
+
+
+def confined(test):
+    """A connect to 0.0.0.0 would reach the driver's listener on 127.0.0.1: the driver must refuse
+    it, and nothing arrive, before a test tries 192.0.2.1 (TEST-NET-1)."""
+    r = node([{"op": "openSocket", "addr": "0.0.0.0"}], violations=True)[0]
+    test.assertEqual((r["accepted"], len(r["violations"])), (0, 1))
+    test.assertTrue(r["violations"][0].startswith("connect 0.0.0.0:"))
 
 
 def ok(r):
@@ -611,6 +620,18 @@ class OpenSocket(NodeTest):
         self.assertEqual((r["accepted"], len(r["violations"])), (0, 1))
         self.assertTrue(r["violations"][0].startswith("connect 127.0.0.2:"))
 
+    def test_nothing_reaches_beyond_loopback(self):
+        # The example's openSocket to 192.0.2.1, plain and over TLS: refused before net connects.
+        confined(self)
+        rs = node([{"op": "openSocket", "addr": "192.0.2.1", "port": 80},
+                   {"op": "openSocket", "addr": "192.0.2.1", "port": 443, "tls": "docs.example.invalid"}],
+                  violations=True)
+        for r, port in zip(rs, (80, 443)):
+            with self.subTest(port=port):
+                self.assertIn("refusing to connect", refused(r, "Error")["message"])
+                self.assertEqual((r["connects"], r["violations"], r["accepted"]),
+                                 ([["192.0.2.1", port]], [f"connect 192.0.2.1:{port}"], 0))
+
 
 class UnusableAnswers(NodeTest):
     URL = "http://docs.example.invalid/guide"
@@ -690,6 +711,18 @@ class UnusableAnswers(NodeTest):
             with self.subTest(code=code, out=out):
                 self.assertIsNone(ok(r)["answers"])
         self.assertEqual(ok(rs[-1])["answers"][0]["decision"], "allow")
+
+    def test_a_connection_to_no_fixture_is_refused(self):
+        # A fetch with no origin fixture: the driver redirects nothing, so the example's connection
+        # to the address the stand-in allows, 192.0.2.1, is refused before net connects.
+        confined(self)
+        answer = {"input": "192.0.2.1", "decision": "allow", "family": "ipv4", "addr": "192.0.2.1"}
+        item = self.item(self.URL, {"docs.example.invalid": [["192.0.2.1"]]},
+                         env={"FAKE_URLFENCE": json.dumps({"addr": fake(out=json.dumps(answer).encode() + b"\n")})})
+        del item["origin"]
+        r = node([item], env={"URLFENCE_BIN": self.fake}, violations=True)[0]
+        self.assertIn("refusing to connect", refused(r)["message"])
+        self.assertEqual((r["connects"], r["violations"]), ([["192.0.2.1", 80]], ["connect 192.0.2.1:80"]))
 
     def test_only_the_checked_address_is_connected_to(self):
         # An answer whose printed address is not the checked one refuses, before connecting; one

@@ -13,7 +13,10 @@ machine.
   or a TLS ClientHello, answered with a fatal alert). For one https test, an origin with a
   throwaway self-signed certificate (made with openssl for the run) completes the handshake.
 
-Unusable answers from the binary are simulated by replacing `subprocess.run`."""
+Unusable answers from the binary are simulated by replacing `subprocess.run`. Whatever a test
+replaces, tests/common.py refuses any connection beyond loopback and any lookup of a name
+(`Confinement` checks it)."""
+import http.client
 import os
 import shutil
 import socket
@@ -27,6 +30,7 @@ import unittest
 import urllib.request
 from unittest import mock
 
+import common
 import compat
 from common import BIN, ROOT
 
@@ -465,6 +469,70 @@ class RealOpenSocket(unittest.TestCase):
         self.assertEqual(lookups, [])
         with self.assertRaises(socket.timeout):
             listener.accept()  # nothing else connected
+
+
+class Confinement(unittest.TestCase):
+    """tests/common.py's guard, through the code paths the tests use: a connection to 192.0.2.1
+    (TEST-NET-1), plain or for TLS, made by the example, http.client, urllib or ssl, and a lookup of a
+    name, are refused with Outbound before they are made."""
+
+    def setUp(self):
+        # A connect to 0.0.0.0 would reach this listener on 127.0.0.1. It is refused and nothing
+        # arrives, so the guard is in place, and stops a connect before it is made, before anything
+        # below tries 192.0.2.1.
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(5)
+        listener.settimeout(0.2)
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(probe.close)
+        self.refused(lambda: probe.connect(("0.0.0.0", listener.getsockname()[1])), "0.0.0.0")
+        with self.assertRaises(socket.timeout):
+            listener.accept()
+        patch = mock.patch.object(urllib.request, "getproxies", lambda: {})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def refused(self, attempt, target):
+        before = len(common.OUTBOUND)
+        with self.assertRaises(common.Outbound):
+            attempt()
+        new = common.OUTBOUND[before:]
+        self.assertEqual(len(new), 1, new)
+        self.assertIn(target, repr(new[0][1]))
+
+    def test_plain(self):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self.refused(lambda: gf.open_socket("192.0.2.1", 80), "192.0.2.1")
+        self.refused(lambda: http.client.HTTPConnection("192.0.2.1", 80, timeout=1).request("GET", "/"), "192.0.2.1")
+        self.refused(lambda: opener.open("http://192.0.2.1/", timeout=1), "192.0.2.1")
+        self.refused(lambda: gf.guarded_fetch("http://192.0.2.1/", allow=["192.0.2.1"], schemes=("http",), pin=False,
+                                              proxies={}), "192.0.2.1")
+
+    def test_tls(self):
+        context = ssl.create_default_context()
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        tls = context.wrap_socket(socket.socket(socket.AF_INET, socket.SOCK_STREAM), server_hostname="docs.example.com")
+        self.addCleanup(tls.close)
+        self.refused(lambda: gf.PinnedHTTPSConnection("docs.example.com", 443, "192.0.2.1", context).connect(),
+                     "192.0.2.1")
+        self.refused(lambda: tls.connect(("192.0.2.1", 443)), "192.0.2.1")
+        self.refused(lambda: http.client.HTTPSConnection("192.0.2.1", 443, timeout=1, context=context).request("GET", "/"),
+                     "192.0.2.1")
+        self.refused(lambda: opener.open("https://192.0.2.1/", timeout=1), "192.0.2.1")
+
+    def test_names_are_not_looked_up(self):
+        # As if a test forgot to replace getaddrinfo: the lookup itself is refused, here also for a
+        # pinned fetch, which resolves the host with getaddrinfo. The name is under .invalid, so
+        # that not even a broken guard could make a real lookup of it.
+        name = "docs.example.invalid"
+        plain = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(plain.close)
+        self.refused(lambda: socket.getaddrinfo(name, 443), name)
+        self.refused(lambda: socket.gethostbyname(name), name)
+        self.refused(lambda: plain.connect((name, 80)), name)
+        self.refused(lambda: gf.guarded_fetch(f"http://{name}/guide", allow=[name], schemes=("http",)), name)
 
 
 def urlfence_says(code, stdout, stderr=b""):

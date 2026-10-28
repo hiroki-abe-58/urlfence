@@ -7,17 +7,20 @@
 // "lookups" (every call of dns.lookup or dns.promises.lookup, which are refused), "resolves" (every
 // call of the resolver given to guardedFetch) and "violations".
 //
-// * While an item runs, every connect call is sent to 127.0.0.1 instead: to the item's "origin"
-//   port (a fixture of the Python test), or, for "openSocket", only to the driver's own listener
-//   on 127.0.0.1, and any other connection is refused and reported. A connect to a local socket
-//   path is refused and reported in both cases.
+// * While a "fetch" item with an "origin" port (a fixture of the Python test) runs, every connect
+//   call is sent to 127.0.0.1 on that port instead. In an "openSocket" item, the only connection
+//   allowed is one to the driver's own listener on 127.0.0.1. Any other connection is refused and
+//   reported before net connects anywhere: every one in a fetch with no "origin", one to a local
+//   socket path, and one outside an item. tls.connect connects through
+//   net.Socket.prototype.connect, so TLS is covered too.
 // * The resolver answers from the item's "answers": host -> list of answers, one per lookup (the
 //   last one repeats), each a list of addresses, or "throw".
 //
 // Items: {"op": "fetch", "url", "options", "answers", "origin", "ca", "agent", "env"},
 // {"op": "check", "url", "options"}, {"op": "checkAddrs", "addrs", "options"},
-// {"op": "openSocket", "addr", "autoSelectFamily"}. "env" sets (a string) or unsets (null) environment
-// variables while the item runs.
+// {"op": "openSocket", "addr", "autoSelectFamily", "port" (the listener's if absent), "tls" (a host
+// name: over TLS)}. "env" sets (a string) or unsets (null) environment variables while the item
+// runs.
 import dns from "node:dns";
 import fs from "node:fs";
 import http from "node:http";
@@ -59,12 +62,12 @@ net.Socket.prototype.connect = function connect(...args) {
     throw new Error("guarded_fetch_node.mjs: refusing a connection outside an item, or to a local socket");
   }
   rec.connects.push([o.host, o.port]);
-  if (target.redirect !== undefined) {
+  if (Number.isInteger(target.redirect)) {
     return realConnect.call(this, { ...o, host: "127.0.0.1", port: target.redirect }, callback);
   }
   if (o.host !== "127.0.0.1" || o.port !== target.only) {
     rec.violations.push(`connect ${o.host}:${o.port}`);
-    throw new Error("guarded_fetch_node.mjs: refusing to connect anywhere but the listener");
+    throw new Error("guarded_fetch_node.mjs: refusing to connect anywhere but the listener or a fixture");
   }
   return realConnect.call(this, o, callback);
 };
@@ -98,7 +101,7 @@ async function fetchItem(item) {
       return create.apply(this, a);
     };
   }
-  target = { redirect: item.origin };
+  target = Number.isInteger(item.origin) ? { redirect: item.origin } : {}; // no origin: nothing may connect
   try {
     const { status, body, hops } = await gf.guardedFetch(item.url, options);
     return { ok: { status, body: body.toString("base64"), hops } };
@@ -113,7 +116,7 @@ async function openSocketItem(item) {
   const before = accepted.length;
   let out;
   try {
-    const s = await gf.openSocket(item.addr, listenerPort, { timeout: 2000 });
+    const s = await gf.openSocket(item.addr, item.port ?? listenerPort, { host: item.tls ?? null, timeout: 2000 });
     s.destroy();
     out = { ok: true };
   } catch (e) {
