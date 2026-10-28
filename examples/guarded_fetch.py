@@ -31,7 +31,9 @@ resolves to an internal address (also after a redirect or a rebinding), at the c
 through a proxy.
 
 The last response is returned whatever its status (a 404, a 304, a 3xx without `Location`), with
-the body cut at `max_bytes`. `TIMEOUT` applies to each socket operation, not to the whole fetch.
+the body cut at `max_bytes`; a body that ends before its Content-Length, because the connection
+closed early (over TLS also without close_notify), refuses. `TIMEOUT` applies to each socket
+operation, not to the whole fetch.
 `hops` lists each check: the URL's decision and, pinned, each address's.
 
 What is still not covered: the port and path are not restricted, a server on an allowed address may
@@ -169,6 +171,17 @@ def open_socket(addr, port):
     return s
 
 
+def read_body(resp, max_bytes):
+    """At most `max_bytes` of the body of `resp`. http.client's `read(amt)` returns a body cut short
+    of its Content-Length as if it were whole (an early close, or over TLS an EOF without
+    close_notify, reads as its end); here that is an IncompleteRead, so the request failed."""
+    body = resp.read(max_bytes)
+    left = getattr(resp, "length", None)  # what Content-Length still promises (None without one)
+    if len(body) < max_bytes and left:
+        raise http.client.IncompleteRead(body, left)
+    return body
+
+
 class PinnedHTTPConnection(http.client.HTTPConnection):
     """http.client's connection for `host`, over a socket to the checked address `addr`."""
 
@@ -242,8 +255,8 @@ def pinned_get(url, r, hop, hops, deny_addr, nat64, context, max_bytes):
                 continue
             hop["connected"] = a["addr"]
             conn.request("GET", target, headers={"Connection": "close"})
-            resp = conn.getresponse()
-            return resp.status, resp.headers, resp.read(max_bytes)
+            with conn.getresponse() as resp:  # closed on every path, as unpinned
+                return resp.status, resp.headers, read_body(resp, max_bytes)
         except (OSError, http.client.HTTPException, ValueError) as e:
             raise Refused(f"request failed: {e}", hops) from e
         finally:
@@ -282,7 +295,7 @@ def guarded_fetch(url, allow, deny=(), schemes=("https",), max_redirects=3, prox
                 except urllib.error.HTTPError as e:
                     resp = e  # an error status still has headers and a body
                 with resp:
-                    status, headers, body = resp.status, resp.headers, resp.read(max_bytes)
+                    status, headers, body = resp.status, resp.headers, read_body(resp, max_bytes)
             except (OSError, http.client.HTTPException, ValueError) as e:  # URLError is an OSError
                 raise Refused(f"request failed: {getattr(e, 'reason', e)}", hops) from e
         if status in (301, 302, 303, 307, 308) and headers.get("Location"):

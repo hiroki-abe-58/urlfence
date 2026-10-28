@@ -368,16 +368,18 @@ and JSON output are ordinary code, covered by tests.
   to, and is verified, pinned or not, under `NODE_TLS_REJECT_UNAUTHORIZED=0`. Unusable answers come
   from a stand-in binary (`URLFENCE_BIN`). Every name is under `.invalid`. Skipped without node or
   openssl, unless `URLFENCE_REQUIRE` names them, as CI and `scripts/reproduce.sh` do.
-* `tests/mutants.py` plants 26 plausible bugs, one at a time, and requires each one to be caught.
+* `tests/mutants.py` plants 27 plausible bugs, one at a time, and requires each one to be caught.
   They include the CVE-style prefix and suffix mistakes, a wrong authority boundary, accepting
   octal IPv4 parts, and for addresses: no IPv4-mapped decoding, the IPv4 address taken at the wrong
   offset, the 6to4 row dropped, a prefix length off by one, the ISATAP `0200:5efe` form missed,
   multicast allowed, `64:ff9b::/96` treated as global, and the CLI ignoring a NAT64 prefix that
-  URLFence would not honour; and in the Node example: addresses not checked again after a
-  redirect, a connection to the host name instead of the checked address, and an answer's `addr`
-  not compared with the address checked. So far every one in the library fails the build, and the
-  script names the file: a theorem or a build-time example; the one in the CLI fails
-  `tests/test_addr.py`, and the three in the Node example fail `tests/test_guarded_fetch_node.py`.
+  URLFence would not honour; in the Node example: addresses not checked again after a redirect, a
+  connection to the host name instead of the checked address, and an answer's `addr` not compared
+  with the address checked; and in the Python example, a body shorter than its Content-Length
+  returned as if whole. So far every one in the library fails the build, and the script names the
+  file: a theorem or a build-time example; the one in the CLI fails `tests/test_addr.py`, the three
+  in the Node example fail `tests/test_guarded_fetch_node.py`, and the one in the Python example
+  fails `tests/test_guarded_fetch.py`.
   Some fail only because a proof script no longer fits the changed code, not because a statement
   became false.
   Dropping the userinfo check or the percent check changes only the reason for a rejection, since
@@ -444,7 +446,9 @@ because it closes the gap the URL check leaves open, at the cost of not working 
 It does nothing about the port or the path, or what a proxy or the server does with the request
 (see below). It bounds the body (`max_bytes`) and the number of redirects, but `TIMEOUT` applies to
 each socket operation, not to the whole fetch: a server that sends slowly can hold a fetch for much
-longer than `TIMEOUT`.
+longer than `TIMEOUT`. A body that ends before its `Content-Length`, because the connection closed
+early (over TLS also without close_notify), raises `Refused` rather than coming back short, in the
+Node example too.
 
 [`examples/guarded_fetch.mjs`](examples/guarded_fetch.mjs) is the same example for Node 18 and
 later (ESM, no dependencies), with the same rules: `await guardedFetch(url, { allow: [...] })`
