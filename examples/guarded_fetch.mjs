@@ -59,8 +59,9 @@
 // * `tls` (CA, client certificate, cipher and version options) takes the place of an SSLContext;
 //   options that could turn verification off are refused. Certificates are verified, against the
 //   URL's host, whatever NODE_TLS_REJECT_UNAUTHORIZED says. With `pin: false` the `tls` options go
-//   to https.request with `rejectUnauthorized: true`, but the options of an `agent` passed in
-//   override them there (an agent made with `rejectUnauthorized: false` does not verify).
+//   to https.request with `rejectUnauthorized: true`, but the options of the agent used (the one
+//   passed in, or https.globalAgent) override them there (an agent made with
+//   `rejectUnauthorized: false` does not verify).
 // * Stricter checks: lists must be arrays of strings; `timeout` must be at least 1 ms (Node takes
 //   0 as no timeout); URLFence's reading must be followed by `/`, `?`, `#` or the end, with a port
 //   from 1 to 65535; an answer's `addr` must be a string; the pinned request must be on the
@@ -360,7 +361,8 @@ async function pinnedGet(url, r, hop, hops, o) {
 }
 
 // GET `url` with Node's http(s).request and `o.agent` (or the global agent): Node resolves the name.
-// The agent's own options override these (its `rejectUnauthorized`, say).
+// The options of the agent used (`o.agent` or https.globalAgent) override these (its
+// `rejectUnauthorized`, say).
 async function unpinnedGet(url, r, hops, o) {
   const { scheme, host, port, target, headers } = reading(url, r, hops);
   try {

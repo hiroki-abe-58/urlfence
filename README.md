@@ -469,8 +469,9 @@ host, not the address: the example calls `checkServerIdentity` with it. Certific
 even under `NODE_TLS_REJECT_UNAUTHORIZED=0`. `tls` passes on CA, client certificate, cipher and
 version options (`ca`, say) and refuses any other, such as `rejectUnauthorized` or
 `checkServerIdentity`, which could turn verification off. With `pin: false` these options and
-`rejectUnauthorized: true` go to `https.request`, but there the options of an `agent` passed in
-override them: an agent made with `rejectUnauthorized: false` does not verify.
+`rejectUnauthorized: true` go to `https.request`, but there the options of the agent used (the
+one passed in, or `https.globalAgent`) override them: an agent made with `rejectUnauthorized:
+false`, or with its own `ca`, `servername` or `checkServerIdentity`, decides verification.
 
 Proxies: Node 18's `http` and `https` take no proxy from the environment. Node 24.13.0 (its
 source read and its agents tried by hand; not in the tests) gives its two global agents a proxy
