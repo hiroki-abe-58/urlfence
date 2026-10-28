@@ -4,12 +4,12 @@
 #
 #   ./scripts/reproduce.sh          # what CI runs, with the full corpus for the client comparison
 #
-# Needs git, elan (for the pinned toolchain), python3, node and curl, and fails without them, as CI
-# does. urllib3 and requests are compared only if they are installed; a client that is missing is
-# reported as skipped, never as passing.
+# Needs git, elan (for the pinned toolchain), python3, node, curl and openssl, and fails without
+# them, as CI does. urllib3 and requests are compared only if they are installed; a client that is
+# missing is reported as skipped, never as passing.
 set -euo pipefail
 
-for t in git lake python3 node curl sha256sum; do
+for t in git lake python3 node curl openssl sha256sum; do
   command -v "$t" >/dev/null || { echo "reproduce: $t not found" >&2; exit 1; }
 done
 # Test the binary built here (tests/common.py honours URLFENCE_BIN), with the pinned toolchain.
@@ -39,7 +39,7 @@ step "proof audit"
 step "registry tables against the IANA files"
 python3 scripts/check_registry.py
 step "tests"
-python3 -m unittest discover -s tests
+URLFENCE_REQUIRE=node,openssl python3 -m unittest discover -s tests
 step "client comparison: self-test, then the full corpus"
 python3 tests/compat.py --self-test --require whatwg,node,urlsplit,urllib.request,curl
 python3 tests/compat.py --require whatwg,node,urlsplit,urllib.request,curl
