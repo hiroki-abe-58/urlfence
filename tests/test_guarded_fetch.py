@@ -55,6 +55,8 @@ ALLOW = dict(allow=["docs.example.com"], schemes=("http",))
 # Bodies cut short of their Content-Length, which refuse, and answers that are not cut short, which
 # do not: a body cut at max_bytes (also at 0), a 304 and a complete 404.
 SHORT = ("/short", "/short404", "/short302")
+# max_bytes values that read the whole body; a short one still refuses.
+READ_ALL = ({"max_bytes": None}, {"max_bytes": -1})
 NOT_SHORT = (("/short", {"max_bytes": 5}, (200, b"01234")), ("/short", {"max_bytes": 0}, (200, b"")),
              ("/not-modified", {}, (304, b"")), ("/missing", {}, (404, b"not found")))
 OPENSSL = shutil.which("openssl")
@@ -193,6 +195,10 @@ class GuardedFetch(unittest.TestCase):
                 with self.assertRaises(gf.Refused) as cm:
                     self.fetch("http://docs.example.com" + path)
                 self.assertIn("request failed", str(cm.exception))
+        for kw in READ_ALL:
+            with self.subTest(**kw):
+                with self.assertRaises(gf.Refused):
+                    self.fetch("http://docs.example.com/short", **kw)
         for path, kw, answer in NOT_SHORT:
             with self.subTest(path=path, **kw):
                 self.assertEqual(self.fetch("http://docs.example.com" + path, **kw)[:2], answer)
@@ -370,6 +376,10 @@ class Pinned(unittest.TestCase):
                 with self.assertRaises(gf.Refused) as cm:
                     self.fetch("http://docs.example.com" + path, answers)
                 self.assertIn("request failed", str(cm.exception))
+        for kw in READ_ALL:
+            with self.subTest(**kw):
+                with self.assertRaises(gf.Refused):
+                    self.fetch("http://docs.example.com/short", answers, **kw)
         for path, kw, answer in NOT_SHORT:
             with self.subTest(path=path, **kw):
                 self.assertEqual(self.fetch("http://docs.example.com" + path, answers, **kw)[:2], answer)

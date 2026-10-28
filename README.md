@@ -353,7 +353,9 @@ and JSON output are ordinary code, covered by tests.
   site-local answers, alone or mixed with a public one, are refused with no connection; an answer
   that turns from public to loopback is refused on the next hop; the request keeps the URL's host
   in `Host` and, for https, as the TLS server name. Unusable answers from the binary, simulated by
-  replacing `subprocess.run`, refuse.
+  replacing `subprocess.run`, refuse. A body shorter than its Content-Length refuses, unpinned and
+  pinned (also with `max_bytes` None or -1), and pinned over https from an origin that closes without
+  close_notify (its throwaway certificate needs openssl).
 * `tests/test_guarded_fetch_node.py` runs the Node example the same way, under node, through
   [`tests/guarded_fetch_node.mjs`](tests/guarded_fetch_node.mjs): there every `net.Socket` connect
   call is recorded with the host and port the example gave it and sent to a fixture on 127.0.0.1

@@ -95,7 +95,8 @@ MUTANTS = {
          "    if (addrKey(a.addr) === null) {")],
     # The Python example (examples/guarded_fetch.py), for tests/test_guarded_fetch.py.
     "P1 Python example: a body shorter than its Content-Length returned as if whole": [
-        (PY_EXAMPLE, "    if len(body) < max_bytes and left:\n        raise http.client.IncompleteRead(body, left)\n", "")],
+        (PY_EXAMPLE, "    if left and len(body) != max_bytes:  # also for max_bytes None or negative, which read it all\n"
+         "        raise http.client.IncompleteRead(body, left)\n", "")],
 }
 
 

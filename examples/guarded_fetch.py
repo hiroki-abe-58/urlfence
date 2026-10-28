@@ -177,7 +177,7 @@ def read_body(resp, max_bytes):
     close_notify, reads as its end); here that is an IncompleteRead, so the request failed."""
     body = resp.read(max_bytes)
     left = getattr(resp, "length", None)  # what Content-Length still promises (None without one)
-    if len(body) < max_bytes and left:
+    if left and len(body) != max_bytes:  # also for max_bytes None or negative, which read it all
         raise http.client.IncompleteRead(body, left)
     return body
 
