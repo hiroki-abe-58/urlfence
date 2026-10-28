@@ -3,6 +3,11 @@
 `ipaddress.is_global` with every difference listed and explained, and the CLI's contract.
 
     python3 tests/test_addr.py --table    # print the parser counts and the is_global comparison
+
+The parser comparison needs glibc's `inet_pton` (Linux; other C libraries read some forms
+differently) and Python 3.9.5 or later (earlier `ipaddress` accepts IPv4 parts with leading zeros).
+How many decisions differ from `is_global` depends on the Python version, whose table of special
+blocks changes between releases; every difference must still be explained below.
 """
 import csv
 import ipaddress
@@ -251,6 +256,11 @@ EXPLAINED = [
     ("an IPv4-mapped address of an IPv4 address that is not globally reachable (100.64.0.0/10) or "
      "multicast; is_global here only asks whether the IPv4 address is private",
      lambda a, r: a in net("::ffff:0:0/96") and r.get("reason", "").startswith("mapped ")),
+    ("2002::/16 (6to4, N/A) is denied as a whole; Pythons before the CVE-2024-4032 update of ipaddress "
+     "do not list it",
+     lambda a, r: a in net("2002::/16")),
+    ("any other registry row that is not globally reachable and that this Python's table does not list",
+     lambda a, r: r.get("reason", "").startswith("registry ")),
 ]
 
 
