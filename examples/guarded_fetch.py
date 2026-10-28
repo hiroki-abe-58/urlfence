@@ -38,6 +38,7 @@ What is still not covered: the port and path are not restricted, a server on an 
 forward the request, and only TCP is pinned. See the README's "What it does not cover".
 """
 import http.client
+import ipaddress
 import json
 import os
 import socket
@@ -150,9 +151,15 @@ def resolve(host, port):
 
 
 def open_socket(addr, port):
-    """A TCP connection to exactly this address and port, with no name lookup. (The tests replace
-    this function to send the connection to a local fixture.)"""
-    s = socket.socket(socket.AF_INET6 if ":" in addr else socket.AF_INET, socket.SOCK_STREAM)
+    """A TCP connection to exactly this numeric address and port. Anything that is not an IPv4 or
+    IPv6 address in numeric form (a name, a scoped address) is a ValueError, so nothing is resolved
+    here. (Most tests replace this function to send the connection to a local fixture.)"""
+    family = socket.AF_INET6 if ":" in addr else socket.AF_INET
+    try:
+        socket.inet_pton(family, addr)
+    except (OSError, TypeError) as e:
+        raise ValueError(f"not a numeric address: {addr!r}") from e
+    s = socket.socket(family, socket.SOCK_STREAM)
     try:
         s.settimeout(TIMEOUT)
         s.connect((addr, port))
@@ -214,6 +221,13 @@ def pinned_get(url, r, hop, hops, deny_addr, nat64, context, max_bytes):
     for a in answers:
         if a["decision"] != "allow":
             raise Refused(f"{a['decision']} ({a.get('reason')}): {host!r} resolves to {a['input']}", hops)
+        # Connect only to the address that was checked: the printed form must be that address.
+        try:
+            same = ipaddress.ip_address(a.get("addr")) == ipaddress.ip_address(a["input"])
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            raise Refused(f"urlfence printed {a.get('addr')!r} for {a['input']!r}", hops)
     failure = None
     for a in answers:  # every one is allowed; connect to the first that answers
         if scheme == "https":

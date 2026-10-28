@@ -322,6 +322,15 @@ class Pinned(unittest.TestCase):
             self.fetch("http://docs.example.com/guide", {})
         self.assertEqual(self.connects, [])
 
+    def test_only_the_checked_address_is_connected_to(self):
+        # An answer whose printed address is not the checked one refuses, before connecting.
+        for addr in ("127.0.0.1", "8.8.4.4", "localhost", None):
+            answer = [{"input": "8.8.8.8", "decision": "allow", "family": "ipv4", "addr": addr}]
+            with self.subTest(addr=addr), mock.patch.object(gf, "check_addrs", return_value=(answer, None)):
+                with self.assertRaises(gf.Refused):
+                    self.fetch("http://docs.example.com/guide", {"docs.example.com": [["8.8.8.8"]]})
+        self.assertEqual(self.connects, [])
+
     def test_unusable_address_answers_refuse(self):
         def says(code, out):
             return mock.patch.object(gf.subprocess, "run",
@@ -333,6 +342,36 @@ class Pinned(unittest.TestCase):
                 self.assertEqual(gf.check_addrs(["8.8.8.8"])[0], None)
         with self.assertRaises(TypeError):
             gf.check_addrs(["8.8.8.8"], deny="10.0.0.0/8")
+
+
+class RealOpenSocket(unittest.TestCase):
+    """The example's own `open_socket`, against a listener on 127.0.0.1: it connects to a numeric
+    address and refuses anything else without a lookup."""
+
+    def test_numeric_only(self):
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(5)
+        listener.settimeout(0.5)
+        port = listener.getsockname()[1]
+        lookups = []
+
+        def no_lookup(host, *args, **kwargs):
+            lookups.append(host)
+            raise OSError("no lookup allowed here")
+
+        with mock.patch.object(socket, "getaddrinfo", no_lookup):
+            s = gf.open_socket("127.0.0.1", port)
+            s.close()
+            conn, _ = listener.accept()
+            conn.close()
+            for bad in ("localhost", "127.1", "0x7f.0.0.1", "fe80::1%lo", "", "127.0.0.1 "):
+                with self.subTest(addr=bad), self.assertRaises(ValueError):
+                    gf.open_socket(bad, port)
+        self.assertEqual(lookups, [])
+        with self.assertRaises(socket.timeout):
+            listener.accept()  # nothing else connected
 
 
 def urlfence_says(code, stdout, stderr=b""):
