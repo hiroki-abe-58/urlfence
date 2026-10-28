@@ -16,6 +16,7 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 MATCH = "  | .sub d, .domain ls => !d.isEmpty && decide (d.length < ls.length) && d.isSuffixOf ls\n"
+NODE_EXAMPLE = "examples/guarded_fetch.mjs"
 CHECK = "    if pol.schemes.contains u.scheme && pol.allow.any (·.matches u.host) && !pol.deny.any (·.matches u.host)\n"
 
 # name -> list of (file, old text, new text)
@@ -79,6 +80,18 @@ MUTANTS = {
          "     else (global6.contains a || wellKnown96.contains a) && !unreachable6 a &&")],
     "A8 the CLI ignores a NAT64 prefix that nat64Ok rejects": [
         ("Main.lean", "      if !Addr.nat64Ok p.base then", "      if false then")],
+    # The Node example (examples/guarded_fetch.mjs), for tests/test_guarded_fetch_node.py.
+    "N1 Node example: a denied address refuses only on the first hop": [
+        (NODE_EXAMPLE, '    if (a.decision !== "allow") {', '    if (a.decision !== "allow" && hops.length === 1) {')],
+    "N2 Node example: connects to the URL's host name, not the checked address": [
+        (NODE_EXAMPLE, "  if (addrKey(addr) === null) throw new TypeError(`not a numeric address: ${JSON.stringify(addr)}`);\n",
+         ""),
+        (NODE_EXAMPLE, "  const where = { host: addr, port, lookup: noLookup, timeout };",
+         "  const where = { host: addr, port, timeout };"),
+        (NODE_EXAMPLE, "      sock = await openSocket(a.addr, port, {", "      sock = await openSocket(host, port, {")],
+    "N3 Node example: an answer's addr not compared with the address checked": [
+        (NODE_EXAMPLE, "    if (addrKey(a.addr) === null || addrKey(a.addr) !== addrKey(a.input)) {",
+         "    if (addrKey(a.addr) === null) {")],
 }
 
 
