@@ -827,7 +827,7 @@ class Confinement(unittest.TestCase):
     def test_names_are_not_looked_up(self):
         # As if a test forgot to replace getaddrinfo: the lookup itself is refused, here also for a
         # pinned fetch, which resolves the host with getaddrinfo. The name is under .invalid, so
-        # that not even a broken guard could make a real lookup of it.
+        # that even with a broken guard, a query that does go out cannot resolve it to anything.
         name = "docs.example.invalid"
         plain = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.addCleanup(plain.close)
