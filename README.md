@@ -374,26 +374,34 @@ and JSON output are ordinary code, covered by tests.
   `addr` is not the address checked, the environment proxies, `pin: false`, and the example's
   `openSocket` against a listener (numeric addresses only, with and without `autoSelectFamily`),
   a redirect to raw forms that WHATWG normalises (checked and requested as the normalised string),
-  and refused `tls` options and timeouts. With openssl, https fixtures with throwaway self-signed
+  refused `tls` options and timeouts, and the `deadline` option. With it, `100 Continue` responses
+  sent 50 ms apart, which `timeout` alone lets through, refuse at the deadline (pinned), and so
+  does a body sent a byte at a time (unpinned), with the connection closed then. A TLS handshake
+  that never ends is closed at the deadline, and the next address is not tried. A lookup that
+  answers after the deadline, and a run whose pipes close after it, are not acted on: no
+  `urlfence` run, lookup or connection follows. A slow `urlfence` run is killed, and a caller's
+  own abort of `check` is reported as such. With openssl, https fixtures with throwaway self-signed
   certificates check that the certificate must match the URL's host, not the address connected
   to, and is verified, pinned or not, under `NODE_TLS_REJECT_UNAUTHORIZED=0`. Unusable answers come
   from a stand-in binary (`URLFENCE_BIN`). Every name is under `.invalid`, and the driver refuses,
   before net connects, any connection that goes to no fixture (a test tries 192.0.2.1, plain and
   over TLS). Skipped without node or openssl, unless `URLFENCE_REQUIRE` names them, as CI and
   `scripts/reproduce.sh` do.
-* `tests/mutants.py` plants 31 plausible bugs, one at a time, and requires each one to be caught.
+* `tests/mutants.py` plants 35 plausible bugs, one at a time, and requires each one to be caught.
   They include the CVE-style prefix and suffix mistakes, a wrong authority boundary, accepting
   octal IPv4 parts, and for addresses: no IPv4-mapped decoding, the IPv4 address taken at the wrong
   offset, the 6to4 row dropped, a prefix length off by one, the ISATAP `0200:5efe` form missed,
   multicast allowed, `64:ff9b::/96` treated as global, and the CLI ignoring a NAT64 prefix that
   URLFence would not honour; in the Node example: addresses not checked again after a redirect, a
-  connection to the host name instead of the checked address, and an answer's `addr` not compared
-  with the address checked; and in the Python example, a body shorter than its Content-Length
-  returned as if whole, responses read with no bound, unpinned https responses read with no bound,
-  the head not bounded, and the end of the bound read as the end of the stream. So far every one in
-  the library fails the build, and the script names the file: a theorem or a build-time example;
-  the one in the CLI fails `tests/test_addr.py`, the three in the Node example fail
-  `tests/test_guarded_fetch_node.py`, and the five in the Python example fail
+  connection to the host name instead of the checked address, an answer's `addr` not compared with
+  the address checked, the deadline not enforced, a deadline that refuses but lets the run or
+  connection under way go on, a TLS handshake under way not ended at the deadline, and a connection
+  to the next address started after it; and in the Python example, a body shorter than its
+  Content-Length returned as if whole, responses read with no bound, unpinned https responses read
+  with no bound, the head not bounded, and the end of the bound read as the end of the stream. So
+  far every one in the library fails the build, and the script names the file: a theorem or a
+  build-time example; the one in the CLI fails `tests/test_addr.py`, the seven in the Node example
+  fail `tests/test_guarded_fetch_node.py`, and the five in the Python example fail
   `tests/test_guarded_fetch.py`.
   Some fail only because a proof script no longer fits the changed code, not because a statement
   became false.
@@ -519,14 +527,28 @@ it does not read `NO_PROXY`. With `pin: false`, `http(s).request` with the `agen
 global agent, and any proxy it uses) resolves the name itself, and no address is checked; with
 `pin: true`, an `agent` is an error.
 
-Its limits are the Python one's, and: `fetch()` (undici) is neither used nor pinned, so a request
-made with it is not covered; code that patches `http` or `net` is not guarded against, beyond the
-request having to use the example's socket; `timeout` (10 s by default) bounds each `urlfence` run
-and each period with no socket activity, not the whole fetch; and the body is cut at `maxBytes`
-without saying whether it was cut, as in Python. Node's HTTP parser refuses trailer fields longer
-than `--max-http-header-size` (16 KiB by default), but does not limit the number of interim
-responses before the response: with Node 18.19.1, the example read 20,000 `100 Continue` responses
-(500 kB), then the response.
+Its limits are the Python one's, except that it has a deadline (below), and: `fetch()` (undici) is
+neither used nor pinned, so a request made with it is not covered; code that patches `http` or
+`net` is not guarded against, beyond the request having to use the example's socket; `timeout`
+(10 s by default) bounds each `urlfence` run and each period with no activity on a connection, not
+the whole fetch, nor the pinned name lookup (`dns.promises.lookup`, or `resolve`, has no timeout
+here; unpinned, the connection's timer runs while Node looks the name up); and the body is cut at
+`maxBytes` without saying whether it was cut, as in Python. Node's HTTP parser refuses trailer
+fields longer than `--max-http-header-size` (16 KiB by default), but does not limit the number of
+interim responses before the response: with Node 18.19.1, the example read 20,000 `100 Continue`
+responses (500 kB), then the response. So a server that sends a byte at a time, each within
+`timeout`, can hold a fetch without end. Over TLS, only a complete TLS record counts as activity
+(seen with Node 18.19.1): a handshake or a record sent a few bytes at a time does not keep the
+connection alive.
+
+The `deadline` option (milliseconds, none by default) bounds the whole fetch, with one timer: when
+it fires, the fetch refuses with the hops so far and the URL it was at, the `urlfence` run under
+way is killed or the connection destroyed, and the example starts nothing more: no other address,
+no `urlfence` run, no lookup. A name lookup cannot be ended: the fetch does not wait for it, but it
+runs on, unused, until the resolver answers (`dns.promises.lookup` holding one of libuv's threads
+until then). With `pin: false` and an agent that had queued the request (one at `maxSockets`),
+the agent may still connect for it after the deadline. Node's timers fire late when the event loop
+is busy, and so may the deadline.
 
 From Lean, build a policy with `UrlFence.Policy.make` and call `Policy.checkString`; for addresses,
 build a `UrlFence.Addr.Config` and call `Config.checkString`.

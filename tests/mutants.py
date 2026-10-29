@@ -93,6 +93,15 @@ MUTANTS = {
     "N3 Node example: an answer's addr not compared with the address checked": [
         (NODE_EXAMPLE, "    if (addrKey(a.addr) === null || addrKey(a.addr) !== addrKey(a.input)) {",
          "    if (addrKey(a.addr) === null) {")],
+    "N4 Node example: the deadline not enforced": [
+        (NODE_EXAMPLE, "  if (deadline === undefined) return follow(url, policy, hops, o);\n",
+         "  return follow(url, policy, hops, o);\n")],
+    "N5 Node example: at the deadline, the fetch refuses but what is under way goes on": [
+        (NODE_EXAMPLE, "      stop.abort(new Error(why));\n", "")],
+    "N6 Node example: a connection or TLS handshake under way not ended at the deadline": [
+        (NODE_EXAMPLE, '      signal.addEventListener("abort", stop);\n', "")],
+    "N7 Node example: a connection to the next address started after the deadline": [
+        (NODE_EXAMPLE, "  if (signal?.aborted) return Promise.reject(aborted(signal));\n", "")],
     # The Python example (examples/guarded_fetch.py), for tests/test_guarded_fetch.py.
     "P1 Python example: a body shorter than its Content-Length returned as if whole": [
         (PY_EXAMPLE, "    if left and len(body) != max_bytes:  # also for max_bytes None or negative, which read it all\n"

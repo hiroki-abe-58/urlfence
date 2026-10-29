@@ -76,6 +76,14 @@ NOT_SHORT = (("/short", {"maxBytes": 5}, (200, b"01234")), ("/short", {"maxBytes
 RAW = "http:||DOCS%2Eexa_mple.invalid:80|a|..|%2e%2e|guide?q=1".replace("|", chr(92)).replace("_", chr(9))
 PAGES[("docs.example.invalid", "/raw")] = (302, {"Location": RAW}, b"")
 PAGES[("docs.example.invalid", "/numeric")] = (302, {"Location": "http://0x7f.1/guide"}, b"")
+# Answers the origin sends piece by piece, 50 ms apart (0.85 s in all, a few hundred bytes): never a
+# long pause, so `timeout` alone lets them through. 100 Continue responses, then the response; and
+# a body, a byte at a time.
+SLOW = {
+    "/slow-interim": [b"HTTP/1.1 100 Continue\r\n\r\n"] * 16
+    + [b"HTTP/1.1 200 X\r\nConnection: close\r\nContent-Length: 5\r\n\r\nhello"],
+    "/slow-body": [b"HTTP/1.1 200 X\r\nConnection: close\r\nContent-Length: 16\r\n\r\n"] + [b"b"] * 16,
+}
 REFUSED_EVERYWHERE = [  # (answers, nat64): each has an answer URLFence does not allow
     (["127.0.0.1"], []), (["10.0.0.1"], []), (["169.254.169.254"], []), (["100.100.100.200"], []),
     (["192.0.0.192"], []), (["::1"], []), (["::ffff:127.0.0.1"], []), (["::ffff:a9fe:a9fe"], []),
@@ -87,9 +95,19 @@ REFUSED_EVERYWHERE = [  # (answers, nat64): each has an answer URLFence does not
 ]
 
 # A stand-in for the binary: prints what FAKE_URLFENCE asks for its subcommand, else runs the real one.
+# With FAKE_URLFENCE_LOG, it adds each run's subcommand to that file. {"hold": s} also runs the real
+# one, but first starts a child that keeps stdout and stderr open s seconds after the run has ended.
 FAKE = """#!{python}
 import base64, json, os, sys, time
+if os.environ.get("FAKE_URLFENCE_LOG"):
+    with open(os.environ["FAKE_URLFENCE_LOG"], "a", encoding="ascii") as f:
+        f.write(sys.argv[1] + " ")
 want = json.loads(os.environ.get("FAKE_URLFENCE", "{{}}")).get(sys.argv[1])
+if want is not None and "hold" in want:
+    if os.fork() == 0:
+        time.sleep(want["hold"])
+        os._exit(0)
+    want = None
 if want is None:
     os.execv({real!r}, [{real!r}] + sys.argv[1:])
 time.sleep(want.get("sleep", 0))
@@ -97,6 +115,21 @@ sys.stdout.buffer.write(base64.b64decode(want.get("out", "")))
 sys.stderr.buffer.write(base64.b64decode(want.get("err", "")))
 sys.exit(want.get("code", 0))
 """
+
+
+def stand_in(cls):
+    """Writes the stand-in binary for the tests of `cls`, as `cls.fake`."""
+    d = tempfile.mkdtemp()
+    cls.addClassCleanup(shutil.rmtree, d)
+    cls.fake = os.path.join(d, "urlfence")
+    with open(cls.fake, "w", encoding="utf-8") as f:
+        f.write(FAKE.format(python=sys.executable, real=BIN))
+    os.chmod(cls.fake, 0o755)
+
+
+def late(url, ms=300):
+    """The message of a fetch refused at a deadline of `ms` while it was at `url`."""
+    return f"no answer within the deadline of {ms} ms: {json.dumps(url)}"
 
 
 def need(tool, path):
@@ -108,15 +141,18 @@ def need(tool, path):
 
 def node(items, env=None, lookups=False, violations=False):
     """Run the driver on these items and return their results. Nothing may connect anywhere but the
-    fixtures (unless `violations`: then what the driver refused is for the test to check), and node
-    itself may resolve nothing (unless `lookups`)."""
+    fixtures (unless `violations`: then what the driver refused is for the test to check), node
+    itself may resolve nothing (unless `lookups`), and nothing may happen between items."""
     full = {k: v for k, v in os.environ.items() if k not in CLEAN}
     full.update({"URLFENCE_BIN": BIN, **(env or {})})
     p = subprocess.run([NODE, DRIVER], input=json.dumps({"items": items}).encode(), capture_output=True, env=full,
                        timeout=120, check=False)
     if p.returncode != 0:
         raise AssertionError(f"driver failed (exit {p.returncode}): {p.stderr.decode(errors='replace')}")
-    results = json.loads(p.stdout.decode().splitlines()[-1])["results"]
+    out = json.loads(p.stdout.decode().splitlines()[-1])
+    if out["strays"]:
+        raise AssertionError(f"between items: {out['strays']}")
+    results = out["results"]
     for r in results:
         if (r["violations"] and not violations) or (r["lookups"] and not lookups):
             raise AssertionError(f"connections {r['violations']}, lookups {r['lookups']}")
@@ -175,10 +211,12 @@ class Origin:
     """A TCP listener on 127.0.0.1 that records the first bytes of each connection, then answers an
     HTTP request from PAGES, or a TLS ClientHello with a fatal alert. With `cert`, it completes TLS
     handshakes with that certificate instead, records each server name (`names`) and each request
-    that arrives over TLS, and answers it from PAGES."""
+    that arrives over TLS, and answers it from PAGES. A path in SLOW is answered piece by piece, and
+    `trickled` records how many pieces went out before the client went away. With `silent`, it
+    answers nothing, and `held` records how long each connection stayed open."""
 
-    def __init__(self, cert=None):
-        self.records, self.names = [], []
+    def __init__(self, cert=None, silent=False):
+        self.records, self.names, self.trickled, self.held = [], [], [], []
         origin = self
         context = None
         if cert is not None:
@@ -188,6 +226,7 @@ class Origin:
 
         class Handler(socketserver.BaseRequestHandler):
             def handle(self):
+                start = time.monotonic()
                 conn = self.request
                 conn.settimeout(5)
                 data = b""
@@ -203,11 +242,29 @@ class Origin:
                     pass
                 if data:
                     origin.records.append(data)
+                if silent:  # until the client goes away
+                    try:
+                        while conn.recv(4096):
+                            pass
+                    except OSError:
+                        pass
+                    origin.held.append(time.monotonic() - start)
+                    return
                 answer = compat.TLS_ALERT if data[:1] == b"\x16" else respond(data)
+                path = (data.split(b" ", 2) + [b"", b""])[1].decode("latin-1")
+                sent = 0
                 try:
-                    conn.sendall(answer)
+                    if path in SLOW:
+                        for piece in SLOW[path]:
+                            conn.sendall(piece)
+                            sent += 1
+                            time.sleep(0.05)
+                    else:
+                        conn.sendall(answer)
                 except OSError:
                     pass
+                if path in SLOW:
+                    origin.trickled.append(sent)
                 if conn is not self.request:
                     conn.close()
 
@@ -501,6 +558,105 @@ class Unpinned(NodeTest):
                                                       ("GET /guide HTTP/1.1", "docs.example.invalid")])
 
 
+class Deadline(NodeTest):
+    """`deadline` bounds the whole fetch, where `timeout` bounds only each pause: 100 Continue
+    responses sent with no pause as long as `timeout` (pinned), a body sent a byte at a time
+    (unpinned), a TLS handshake that never ends, a lookup that answers late, and a urlfence run that
+    ends late. When it passes, the fetch refuses at once, its connection is closed, and nothing more
+    is started: no other address, no urlfence run, no lookup. (UnusableAnswers has a slow urlfence
+    run.) Where a test needs it, the runs go through the stand-in, which logs them."""
+    URL = "http://docs.example.invalid/guide"
+    ANSWERS = {"docs.example.invalid": [["8.8.8.8"]]}
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        stand_in(cls)
+
+    def setUp(self):
+        super().setUp()
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        self.log = os.path.join(d, "runs")
+
+    def logged(self, items):
+        """`node(items)` with the stand-in, which logs each run."""
+        return node(items, env={"URLFENCE_BIN": self.fake, "FAKE_URLFENCE_LOG": self.log})
+
+    def runs(self):
+        """The subcommand of each run the stand-in logged."""
+        if not os.path.exists(self.log):
+            return []
+        with open(self.log, encoding="ascii") as f:
+            return f.read().split()
+
+    def test_a_slow_answer_is_cut_at_the_deadline(self):
+        interim, body = "http://docs.example.invalid/slow-interim", "http://docs.example.invalid/slow-body"
+        rs = node([self.item(interim, self.ANSWERS, timeout=500),
+                   self.item(interim, self.ANSWERS, timeout=500, deadline=300),
+                   self.item(body, {}, timeout=500, deadline=300, pin=False)])
+        self.assertEqual(ok(rs[0])["body"], b"hello")  # after 0.85 s, never 500 ms without a byte
+        self.assertEqual([refused(r)["message"] for r in rs[1:]], [late(interim), late(body)])
+        self.assertEqual(refused(rs[1])["hops"][0]["connected"], "8.8.8.8")
+        self.assertEqual([r["connects"] for r in rs[1:]], [[["8.8.8.8", 80]], [["docs.example.invalid", 80]]])
+        # The connection was closed at the deadline: the origin could not send the rest.
+        until = time.monotonic() + 2
+        while len(self.origin.trickled) < 3 and time.monotonic() < until:
+            time.sleep(0.01)
+        whole = len(SLOW["/slow-interim"])  # as many pieces as /slow-body
+        self.assertEqual([n < whole for n in sorted(self.origin.trickled)], [True, True, False])
+
+    def test_a_handshake_under_way_ends_at_the_deadline_and_no_other_address_is_tried(self):
+        # The origin never answers the ClientHello; `timeout` alone would hold each address 3 s.
+        silent = Origin(silent=True)
+        self.addCleanup(silent.close)
+        url = "https://docs.example.invalid/guide"
+        start = time.monotonic()
+        r, wait = node([self.item(url, {"docs.example.invalid": [["8.8.8.8", "8.8.4.4"]]}, schemes=["https"],
+                                  timeout=3000, deadline=300, origin=silent.port),
+                        {"op": "wait", "ms": 200}])
+        took = time.monotonic() - start
+        self.assertEqual(refused(r)["message"], late(url))
+        self.assertEqual((r["connects"], wait["connects"]), ([["8.8.8.8", 443]], []))
+        until = time.monotonic() + 2
+        while not silent.held and time.monotonic() < until:
+            time.sleep(0.01)
+        self.assertEqual(len(silent.held), 1)
+        self.assertLess(silent.held[0], 1.5)  # closed at the deadline, not after `timeout`
+        self.assertLess(took, 2.5)
+
+    def test_a_late_lookup_is_not_waited_for_and_nothing_follows_it(self):
+        answers = {"docs.example.invalid": [{"after": 700, "addrs": ["8.8.8.8"]}]}
+        r, wait = self.logged([self.item(self.URL, answers, deadline=500), {"op": "wait", "ms": 600}])
+        e = refused(r)
+        self.assertEqual((e["message"], e["hops"]),
+                         (late(self.URL, 500), [{"url": self.URL, "decision": "allow", "reason": None}]))
+        # The lookup answered after the deadline: no urlfence addr run followed, nor a connection.
+        self.assertEqual(self.runs(), ["check"])
+        self.assertEqual((r["connects"], wait["connects"], wait["resolves"], self.origin.records), ([], [], [], []))
+
+    def test_a_run_that_ends_after_the_deadline_is_not_used(self):
+        # The stand-in answers at once, as the binary does, but a child of it holds its pipes for
+        # 0.6 s: node sees the run end only after the deadline, and must not act on its answer.
+        hold = {"FAKE_URLFENCE": json.dumps({"check": {"hold": 0.6}})}
+        r, wait = self.logged([self.item(self.URL, self.ANSWERS, deadline=300, env=hold), {"op": "wait", "ms": 600}])
+        self.assertEqual((refused(r)["message"], refused(r)["hops"]), (late(self.URL), []))
+        self.assertEqual((r["resolves"], wait["resolves"], wait["connects"], self.runs()), ([], [], [], ["check"]))
+
+    def test_a_deadline_is_a_whole_number_of_ms_and_a_quick_fetch_is_left_alone(self):
+        start = time.monotonic()
+        rs = node([self.item(self.URL, self.ANSWERS, deadline=d) for d in (0, -1, 1.5, "300", 2 ** 31, None)]
+                  + [self.item(self.URL, self.ANSWERS, deadline=2 ** 31 - 1),
+                     self.item("http://docs.example.invalid/moved", self.ANSWERS, deadline=5000)])
+        for r in rs[:-2]:
+            self.assertIn("deadline must be an integer", refused(r, "TypeError")["message"])
+            self.assertEqual((r["resolves"], r["connects"]), ([], []))
+        self.assertEqual(ok(rs[-2])["body"], b"the guide")
+        out = ok(rs[-1])
+        self.assertEqual((out["status"], out["body"], len(out["hops"])), (200, b"the guide", 2))
+        self.assertLess(time.monotonic() - start, 4)  # their timers were cleared: node did not wait
+
+
 class Certificates(NodeTest):
     """https against fixtures that complete the handshake, each with a throwaway self-signed
     certificate for one name: the certificate must match the URL's host, not the address connected
@@ -639,19 +795,15 @@ class UnusableAnswers(NodeTest):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        d = tempfile.mkdtemp()
-        cls.addClassCleanup(shutil.rmtree, d)
-        cls.fake = os.path.join(d, "urlfence")
-        with open(cls.fake, "w", encoding="utf-8") as f:
-            f.write(FAKE.format(python=sys.executable, real=BIN))
-        os.chmod(cls.fake, 0o755)
+        stand_in(cls)
 
     def run_fake(self, items):
         return node(items, env={"URLFENCE_BIN": self.fake})
 
-    def check(self, url=URL, options=None, **answer):
+    def check(self, url=URL, options=None, abort=None, **answer):
         env = {"FAKE_URLFENCE": json.dumps({"check": fake(**answer)} if answer else {})}
-        return {"op": "check", "url": url, "options": {**ALLOW, **(options or {})}, "env": env}
+        item = {"op": "check", "url": url, "options": {**ALLOW, **(options or {})}, "env": env}
+        return item if abort is None else {**item, "abort": abort}
 
     def test_each_refuses(self):
         good = b'{"input":"%s","decision":"allow"}\n' % self.URL.encode()
@@ -680,6 +832,26 @@ class UnusableAnswers(NodeTest):
         for r in zero:
             self.assertIn("at least 1 ms", refused(r, "TypeError")["message"])
             self.assertEqual((r["resolves"], r["connects"]), ([], []))
+
+    def test_the_deadline_ends_a_slow_urlfence_run(self):
+        # The stand-in sleeps 5 s: unless the deadline kills it, node waits for it before exiting.
+        start = time.monotonic()
+        r = self.run_fake([self.item(self.URL, {"docs.example.invalid": [["8.8.8.8"]]}, deadline=300,
+                                     env={"FAKE_URLFENCE": json.dumps({"check": fake(sleep=5)})})])[0]
+        self.assertEqual((refused(r)["message"], refused(r)["hops"]), (late(self.URL), []))
+        self.assertEqual((r["resolves"], r["connects"]), ([], []))
+        self.assertLess(time.monotonic() - start, 4)
+
+    def test_a_callers_abort_refuses_and_says_so(self):
+        # check's `signal`, aborted before the run (its reason a string, or null), or 200 ms into a
+        # run that would sleep 5 s: killed then, and reported as the abort, not as the timeout.
+        start = time.monotonic()
+        rs = self.run_fake([self.check(abort={"after": 0, "reason": "stop"}),
+                            self.check(abort={"after": 0, "reason": None}),
+                            self.check(abort={"after": 200, "reason": "stop"}, sleep=5, out=b"")])
+        self.assertEqual([ok(r) for r in rs], [{"decision": "reject", "reason": f"urlfence did not run: aborted: {why}"}
+                                               for why in ("stop", "null", "stop")])
+        self.assertLess(time.monotonic() - start, 4)
 
     def test_a_missing_binary_refuses(self):
         r = node([self.check()], env={"URLFENCE_BIN": os.path.join(ROOT, "no-such-urlfence")})[0]

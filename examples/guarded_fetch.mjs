@@ -35,7 +35,12 @@
 //
 // The last response is returned whatever its status, with the body cut at `maxBytes` (nothing says
 // whether it was cut). `timeout` (milliseconds) bounds each urlfence run and each period without
-// socket activity, not the whole fetch: a server that sends slowly can hold a fetch much longer.
+// activity on a connection, not the pinned name lookup, nor the whole fetch: a server that sends a
+// byte at a time can hold a fetch without end (Node reads any number of `100 Continue` responses).
+// `deadline` (milliseconds, none by default) bounds the whole fetch, with one timer: when it fires,
+// guardedFetch refuses, ends the urlfence run, connection or request under way, and starts nothing
+// more. It cannot end a name lookup, which runs on, unused, until the resolver answers; and with
+// `pin: false`, an agent that had queued the request may still connect for it.
 // `hops` lists each check: the URL's decision and, pinned, each address's.
 //
 // Not covered: the port and path are not restricted, a server on an allowed address may forward
@@ -66,7 +71,8 @@
 //   0 as no timeout); URLFence's reading must be followed by `/`, `?`, `#` or the end, with a port
 //   from 1 to 65535; an answer's `addr` must be a string; the pinned request must be on the
 //   connection guardedFetch opened (in case code patches `http`).
-// * `timeout` and `resolve` are options, and the result is an object.
+// * `timeout` and `resolve` are options, and the result is an object. guarded_fetch.py has no
+//   `deadline`.
 import { execFile } from "node:child_process";
 import dns from "node:dns";
 import http from "node:http";
@@ -104,14 +110,42 @@ function millis(timeout) {
   if (!Number.isSafeInteger(timeout) || timeout < 1) throw new TypeError("timeout must be an integer, at least 1 ms");
 }
 
-// Run urlfence: {code, stdout (ASCII; any other byte becomes U+FFFD), stderr}, or {error}.
-function run(args, timeout) {
+// Why `signal` aborted, as an Error: its reason can be anything, null included, or a value that
+// String cannot convert (an object with no prototype, say).
+function aborted(signal) {
+  const r = signal.reason;
+  if (r instanceof Error) return r;
+  let why;
+  try {
+    why = String(r);
+  } catch {
+    why = "a reason with no string form";
+  }
+  return new Error(`aborted: ${why}`);
+}
+
+// Run urlfence: {code, stdout (ASCII; any other byte becomes U+FFFD), stderr}, or {error}. When
+// `signal` aborts, the run is ended as the timeout ends it (its pipes closed, then SIGKILL), and
+// gives {error}, also if urlfence had exited before but its pipes closed after (held by a child).
+function run(args, timeout, signal) {
   return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve({ error: aborted(signal).message });
+      return;
+    }
     let child;
+    const kill = () => {
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      child.kill("SIGKILL");
+    };
     try {
       child = execFile(URLFENCE, args, { encoding: "buffer", timeout, killSignal: "SIGKILL", maxBuffer: 64 << 20 },
         (err, stdout, stderr) => {
-          if (err && typeof err.code !== "number") {
+          signal?.removeEventListener("abort", kill);
+          if (signal?.aborted) {
+            resolve({ error: aborted(signal).message });
+          } else if (err && typeof err.code !== "number") {
             resolve({ error: err.killed ? `no answer within ${timeout} ms` : err.message });
           } else {
             resolve({ code: err ? err.code : 0, stdout: stdout.toString("latin1").replace(/[\x80-\xff]/g, "\ufffd"),
@@ -122,6 +156,7 @@ function run(args, timeout) {
       resolve({ error: e.message }); // an argument execFile cannot pass, such as one with a NUL
       return;
     }
+    signal?.addEventListener("abort", kill);
     child.stdin.on("error", () => {});
     child.stdin.end(); // nothing on stdin
   });
@@ -136,8 +171,9 @@ function parse(line) {
   }
 }
 
-// URLFence's answer for one URL, as an object; a `reject` whenever the answer is unusable.
-export async function check(url, { allow, deny = [], schemes = ["https"], timeout = TIMEOUT } = {}) {
+// URLFence's answer for one URL, as an object; a `reject` whenever the answer is unusable. An
+// AbortSignal `signal` ends the run when it aborts.
+export async function check(url, { allow, deny = [], schemes = ["https"], timeout = TIMEOUT, signal = null } = {}) {
   strings({ allow, deny, schemes });
   millis(timeout);
   if (typeof url !== "string") return { decision: "reject", reason: "urlfence did not run: the URL is not a string" };
@@ -145,7 +181,7 @@ export async function check(url, { allow, deny = [], schemes = ["https"], timeou
   for (const a of allow) args.push("--allow", a);
   for (const d of deny) args.push("--deny", d);
   for (const s of schemes) args.push("--scheme", s);
-  const p = await run([...args, "--", url], timeout);
+  const p = await run([...args, "--", url], timeout, signal);
   if (p.error !== undefined) return { decision: "reject", reason: `urlfence did not run: ${p.error}` };
   if (p.code === 2) return { decision: "reject", reason: "urlfence: " + p.stderr.trim() }; // a usage error
   const lines = p.stdout.split("\n");
@@ -163,14 +199,14 @@ export async function check(url, { allow, deny = [], schemes = ["https"], timeou
 }
 
 // URLFence's answers for these address strings, as {answers, reason: null}, or {answers: null,
-// reason} when there is no usable answer.
-export async function checkAddrs(addrs, { deny = [], nat64 = [], timeout = TIMEOUT } = {}) {
+// reason} when there is no usable answer. `signal` as for check.
+export async function checkAddrs(addrs, { deny = [], nat64 = [], timeout = TIMEOUT, signal = null } = {}) {
   strings({ deny, nat64 });
   millis(timeout);
   const args = ["addr"];
   for (const d of deny) args.push("--deny", d);
   for (const n of nat64) args.push("--nat64", n);
-  const p = await run([...args, "--", ...addrs], timeout);
+  const p = await run([...args, "--", ...addrs], timeout, signal);
   const none = (reason) => ({ answers: null, reason });
   if (p.error !== undefined) return none(`urlfence did not run: ${p.error}`);
   if (p.code === 2) return none("urlfence: " + p.stderr.trim()); // a usage error, e.g. an invalid prefix
@@ -215,9 +251,12 @@ function noLookup(host, options, callback) {
 // A connection to exactly this numeric address and port; with `host`, over TLS with `host` as the
 // server name and the name the certificate must match. Anything that is not an IPv4 or IPv6
 // address in numeric form (a name, a scoped address) is a TypeError, so nothing is resolved here.
-export function openSocket(addr, port, { host = null, tlsOptions = {}, timeout = TIMEOUT } = {}) {
+// When an AbortSignal `signal` aborts, the connection ends, however active it is; once it has
+// aborted, none is started.
+export function openSocket(addr, port, { host = null, tlsOptions = {}, timeout = TIMEOUT, signal = null } = {}) {
   if (addrKey(addr) === null) throw new TypeError(`not a numeric address: ${JSON.stringify(addr)}`);
   millis(timeout);
+  if (signal?.aborted) return Promise.reject(aborted(signal));
   const where = { host: addr, port, lookup: noLookup, timeout };
   return new Promise((resolve, reject) => {
     const s = host === null ? net.connect(where) : tls.connect({
@@ -225,6 +264,11 @@ export function openSocket(addr, port, { host = null, tlsOptions = {}, timeout =
       servername: net.isIP(host) ? undefined : host, // RFC 6066: no server name for an address
       checkServerIdentity: (_, cert) => tls.checkServerIdentity(host, cert),
     });
+    if (signal) {
+      const stop = () => s.destroy(aborted(signal));
+      signal.addEventListener("abort", stop);
+      s.once("close", () => signal.removeEventListener("abort", stop));
+    }
     s.on("timeout", () => s.destroy(new Error(`no activity for ${timeout} ms`)));
     s.on("error", () => {}); // after the connection, errors reach the request
     s.once("error", reject);
@@ -236,18 +280,23 @@ export function openSocket(addr, port, { host = null, tlsOptions = {}, timeout =
 }
 
 // One GET: {status, headers, body (at most maxBytes)}. With `sock`, the request must go over it.
-function exchange(mod, options, maxBytes, sock = null) {
+// When `signal` aborts, the request ends. (It has not aborted yet: exchange is called as soon as
+// openSocket or check returns, with nothing awaited between, and both refuse once it has.)
+function exchange(mod, options, maxBytes, sock = null, signal = null) {
   return new Promise((resolve, reject) => {
     let settled = false;
     let req = null;
+    const stop = () => finish(aborted(signal));
     const finish = (err, value) => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener("abort", stop);
       req?.destroy();
       sock?.destroy();
       if (err) reject(err);
       else resolve(value);
     };
+    signal?.addEventListener("abort", stop);
     try {
       req = mod.request(options);
     } catch (e) {
@@ -323,7 +372,8 @@ async function pinnedGet(url, r, hop, hops, o) {
     throw new Refused(`could not resolve ${JSON.stringify(host)}: ${e.message}`, hops);
   }
   if (addrs.length === 0) throw new Refused(`${JSON.stringify(host)} has no address`, hops);
-  const { answers, reason: why } = await checkAddrs(addrs, { deny: o.denyAddr, nat64: o.nat64, timeout: o.timeout });
+  const { answers, reason: why } = await checkAddrs(addrs, { deny: o.denyAddr, nat64: o.nat64, timeout: o.timeout,
+    signal: o.signal });
   if (answers === null) {
     hop.addrs = addrs.map((a) => ({ addr: a, decision: "reject", reason: why }));
     throw new Refused(`reject (${why}): the addresses of ${JSON.stringify(host)}`, hops);
@@ -343,7 +393,7 @@ async function pinnedGet(url, r, hop, hops, o) {
     let sock;
     try {
       sock = await openSocket(a.addr, port, { host: scheme === "https" ? host : null, tlsOptions: o.tls,
-        timeout: o.timeout });
+        timeout: o.timeout, signal: o.signal });
     } catch (e) {
       if (e instanceof TypeError) throw new Refused(`request failed: ${e.message}`, hops);
       failure = e; // refused, timed out, or the TLS handshake or certificate failed: try the next
@@ -352,7 +402,7 @@ async function pinnedGet(url, r, hop, hops, o) {
     hop.connected = a.addr;
     try {
       return await exchange(http, { host: a.addr, port, method: "GET", path: target, headers,
-        createConnection: () => sock }, o.maxBytes, sock);
+        createConnection: () => sock }, o.maxBytes, sock, o.signal);
     } catch (e) {
       throw new Refused(`request failed: ${e.message}`, hops);
     }
@@ -368,7 +418,7 @@ async function unpinnedGet(url, r, hops, o) {
   try {
     return await exchange(scheme === "https" ? https : http, { ...o.tls, host, port, method: "GET", path: target,
       headers, agent: o.agent, timeout: o.timeout, servername: net.isIP(host) ? "" : host, rejectUnauthorized: true },
-    o.maxBytes);
+    o.maxBytes, null, o.signal);
   } catch (e) {
     throw new Refused(`request failed: ${e.message}`, hops);
   }
@@ -376,9 +426,10 @@ async function unpinnedGet(url, r, hops, o) {
 
 // {status, body, hops} for the last response, or a Refused rejection. `denyAddr` and `nat64` are
 // prefixes for `urlfence addr --deny` and `--nat64`; `tls` holds options for https (`ca`, say);
-// `resolve(host, {all: true})` answers like `dns.promises.lookup`; `agent` is for pin: false.
+// `resolve(host, {all: true})` answers like `dns.promises.lookup`; `agent` is for pin: false;
+// `deadline` (ms) bounds the whole fetch.
 export async function guardedFetch(url, { allow, deny = [], schemes = ["https"], maxRedirects = 3, agent,
-  maxBytes = 1 << 20, pin = true, denyAddr = [], nat64 = [], tls: tlsOptions = {}, timeout = TIMEOUT,
+  maxBytes = 1 << 20, pin = true, denyAddr = [], nat64 = [], tls: tlsOptions = {}, timeout = TIMEOUT, deadline,
   resolve = (host, options) => dns.promises.lookup(host, options) } = {}) {
   if (pin && agent !== undefined) {
     throw new Error("an agent connects where it likes, so nothing can be pinned: pass pin: false to use one");
@@ -391,10 +442,42 @@ export async function guardedFetch(url, { allow, deny = [], schemes = ["https"],
     if (!Number.isSafeInteger(n) || n < 0) throw new TypeError(`${name} must be a non-negative integer`);
   }
   millis(timeout);
-  const o = { agent, maxBytes, denyAddr, nat64, tls: tlsOptions, timeout, resolve };
+  // setTimeout's range (Node would run a longer timer at once).
+  if (deadline !== undefined && (!Number.isSafeInteger(deadline) || deadline < 1 || deadline > 0x7fffffff)) {
+    throw new TypeError("deadline must be an integer from 1 to 2147483647 ms");
+  }
+  const o = { agent, maxBytes, denyAddr, nat64, tls: tlsOptions, timeout, resolve, signal: null, url };
   const hops = [];
+  const policy = { allow, deny, schemes, maxRedirects, timeout, pin };
+  if (deadline === undefined) return follow(url, policy, hops, o);
+  // One timer for the whole fetch. When it fires, the fetch refuses with the hops so far and the
+  // URL it was at (`o.url`), and the signal ends the run, connection or request under way. What
+  // would come next then fails before it starts (after a lookup, once the resolver answers). None
+  // of that is reported.
+  const stop = new AbortController();
+  o.signal = stop.signal;
+  let timer;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const why = `no answer within the deadline of ${deadline} ms`;
+      reject(new Refused(`${why}: ${JSON.stringify(o.url)}`, structuredClone(hops)));
+      stop.abort(new Error(why));
+    }, deadline);
+  });
+  const work = follow(url, policy, hops, o);
+  work.catch(() => {});
+  try {
+    return await Promise.race([work, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The hops of guardedFetch: check the URL, request it, and check a redirect before following it.
+async function follow(url, { allow, deny, schemes, maxRedirects, timeout, pin }, hops, o) {
   for (let i = 0; i <= maxRedirects; i++) {
-    const r = await check(url, { allow, deny, schemes, timeout });
+    o.url = url;
+    const r = await check(url, { allow, deny, schemes, timeout, signal: o.signal });
     const hop = { url, decision: r.decision, reason: r.reason ?? null };
     hops.push(hop);
     if (r.decision !== "allow") {
