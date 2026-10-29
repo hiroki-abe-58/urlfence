@@ -35,7 +35,8 @@
 //
 // The last response is returned whatever its status, with the body cut at `maxBytes` (nothing says
 // whether it was cut). `timeout` (milliseconds) bounds each urlfence run and each period without
-// socket activity, not the whole fetch: a server that sends slowly can hold a fetch much longer.
+// activity on a connection, not the pinned name lookup, nor the whole fetch: a server that sends a
+// byte at a time can hold a fetch without end (Node reads any number of `100 Continue` responses).
 // `hops` lists each check: the URL's decision and, pinned, each address's.
 //
 // Not covered: the port and path are not restricted, a server on an allowed address may forward

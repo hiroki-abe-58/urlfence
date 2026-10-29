@@ -522,11 +522,15 @@ global agent, and any proxy it uses) resolves the name itself, and no address is
 Its limits are the Python one's, and: `fetch()` (undici) is neither used nor pinned, so a request
 made with it is not covered; code that patches `http` or `net` is not guarded against, beyond the
 request having to use the example's socket; `timeout` (10 s by default) bounds each `urlfence` run
-and each period with no socket activity, not the whole fetch; and the body is cut at `maxBytes`
-without saying whether it was cut, as in Python. Node's HTTP parser refuses trailer fields longer
-than `--max-http-header-size` (16 KiB by default), but does not limit the number of interim
-responses before the response: with Node 18.19.1, the example read 20,000 `100 Continue` responses
-(500 kB), then the response.
+and each period with no activity on a connection, not the whole fetch, nor the pinned name lookup
+(`dns.promises.lookup`, or `resolve`, has no timeout here; unpinned, the connection's timer runs
+while Node looks the name up); and the body is cut at `maxBytes` without saying whether it was cut,
+as in Python. Node's HTTP parser refuses trailer fields longer than `--max-http-header-size` (16 KiB
+by default), but does not limit the number of interim responses before the response: with Node
+18.19.1, the example read 20,000 `100 Continue` responses (500 kB), then the response. So a server
+that sends a byte at a time, each within `timeout`, can hold a fetch without end. Over TLS, only a
+complete TLS record counts as activity (seen with Node 18.19.1): a handshake or a record sent a few
+bytes at a time does not keep the connection alive.
 
 From Lean, build a policy with `UrlFence.Policy.make` and call `Policy.checkString`; for addresses,
 build a `UrlFence.Addr.Config` and call `Config.checkString`.
