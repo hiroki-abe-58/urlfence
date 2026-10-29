@@ -36,9 +36,11 @@ closed early (over TLS also without close_notify), refuses. What http.client rea
 is bounded too (`BoundedResponse`): at most HEAD_BYTES (64 KiB) for the head, the status line and
 headers and any `100 Continue` responses before them, and then at most twice `max_bytes` plus
 SLACK_BYTES (64 KiB) for the body, its chunk framing and its trailer fields; a response that needs
-more refuses. With `max_bytes` None or negative only the head is bounded. `TIMEOUT` applies to each
-socket operation, not to the whole fetch: nothing limits how long a server that sends slowly can
-hold it.
+more refuses. With `max_bytes` None or negative only the head is bounded. `TIMEOUT` bounds each
+urlfence run, each connection attempt, each TLS handshake and each read or write on the connection,
+not the name lookup (`getaddrinfo` takes no timeout) nor the whole fetch: a server that sends a byte
+at a time, each within TIMEOUT, can hold a response for a TIMEOUT per byte that the bounds above let
+http.client read, and without end with `max_bytes` None or negative.
 `hops` lists each check: the URL's decision and, pinned, each address's.
 
 What is still not covered: the port and path are not restricted, a server on an allowed address may

@@ -468,11 +468,16 @@ has come: about a third of `max_bytes`, in chunks of 1 byte. On its own, http.cl
 any number of `100 Continue` responses, trailer lines after a chunked body and chunk extensions,
 far past `max_bytes`, each socket operation within `TIMEOUT` (seen with Python 3.10.20, 3.11.9,
 3.12.3, 3.12.13 and 3.13.14). With `max_bytes` None or negative, only the head is bounded. This
-counts what http.client reads after TLS; it bounds neither TLS records nor the time taken.
-`TIMEOUT` applies to each socket operation, not to the whole fetch: there is no deadline, and a
-server that sends slowly can hold a fetch for much longer than `TIMEOUT`. A body that ends before
-its `Content-Length`, because the connection closed early (over TLS also without close_notify),
-raises `Refused` rather than coming back short, in the Node example too.
+counts what http.client reads after TLS, not TLS records. `TIMEOUT` bounds each `urlfence` run,
+each connection attempt (one per address, until one connects), each TLS handshake and each read or
+write on the connection (over TLS, a handshake or a read as a whole), not the whole fetch: there is
+no deadline. Nor does it bound the name lookup: `getaddrinfo` takes no timeout, and only the
+system resolver's own settings end it. A server that sends a byte at a time, each within
+`TIMEOUT`, can hold a response for a `TIMEOUT` per byte that http.client may read under the bounds
+above (about 2.2 million with the defaults: months), and without end with `max_bytes` None or
+negative. A body that ends before its `Content-Length`, because the connection closed early (over
+TLS also without close_notify), raises `Refused` rather than coming back short, in the Node example
+too.
 
 [`examples/guarded_fetch.mjs`](examples/guarded_fetch.mjs) is the same example for Node 18 and
 later (ESM, no dependencies), with the same rules: `await guardedFetch(url, { allow: [...] })`
