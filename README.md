@@ -355,7 +355,16 @@ and JSON output are ordinary code, covered by tests.
   in `Host` and, for https, as the TLS server name. Unusable answers from the binary, simulated by
   replacing `subprocess.run`, refuse. A body shorter than its Content-Length refuses, unpinned and
   pinned (also with `max_bytes` None or -1), and pinned over https from an origin that closes without
-  close_notify (its throwaway certificate needs openssl).
+  close_notify (its throwaway certificate needs openssl). A flood of trailer lines after a chunked
+  body, or of `100 Continue` responses before the response, refuses, unpinned and pinned (and
+  pinned over https), while a few of either do not, and a refused fetch leaves no file descriptor
+  open. Over a connection in memory, where how much was read is exact, a flood (also of chunk
+  extensions) is refused within the bounds below, pinned and unpinned (for http and https, so
+  through both urllib handlers), a head of exactly 64 KiB passes and one byte more does not, and
+  ordinary answers are read byte for byte as http.client reads them. Every test runs with
+  `tests/common.py` refusing, before the call, any connection beyond loopback and any lookup of a
+  name made through Python's `socket` module, whoever makes it (http.client, urllib and ssl
+  included); tests try 192.0.2.1, plain and for TLS, to check it.
 * `tests/test_guarded_fetch_node.py` runs the Node example the same way, under node, through
   [`tests/guarded_fetch_node.mjs`](tests/guarded_fetch_node.mjs): there every `net.Socket` connect
   call is recorded with the host and port the example gave it and sent to a fixture on 127.0.0.1
@@ -368,9 +377,11 @@ and JSON output are ordinary code, covered by tests.
   and refused `tls` options and timeouts. With openssl, https fixtures with throwaway self-signed
   certificates check that the certificate must match the URL's host, not the address connected
   to, and is verified, pinned or not, under `NODE_TLS_REJECT_UNAUTHORIZED=0`. Unusable answers come
-  from a stand-in binary (`URLFENCE_BIN`). Every name is under `.invalid`. Skipped without node or
-  openssl, unless `URLFENCE_REQUIRE` names them, as CI and `scripts/reproduce.sh` do.
-* `tests/mutants.py` plants 27 plausible bugs, one at a time, and requires each one to be caught.
+  from a stand-in binary (`URLFENCE_BIN`). Every name is under `.invalid`, and the driver refuses,
+  before net connects, any connection that goes to no fixture (a test tries 192.0.2.1, plain and
+  over TLS). Skipped without node or openssl, unless `URLFENCE_REQUIRE` names them, as CI and
+  `scripts/reproduce.sh` do.
+* `tests/mutants.py` plants 31 plausible bugs, one at a time, and requires each one to be caught.
   They include the CVE-style prefix and suffix mistakes, a wrong authority boundary, accepting
   octal IPv4 parts, and for addresses: no IPv4-mapped decoding, the IPv4 address taken at the wrong
   offset, the 6to4 row dropped, a prefix length off by one, the ISATAP `0200:5efe` form missed,
@@ -378,10 +389,12 @@ and JSON output are ordinary code, covered by tests.
   URLFence would not honour; in the Node example: addresses not checked again after a redirect, a
   connection to the host name instead of the checked address, and an answer's `addr` not compared
   with the address checked; and in the Python example, a body shorter than its Content-Length
-  returned as if whole. So far every one in the library fails the build, and the script names the
-  file: a theorem or a build-time example; the one in the CLI fails `tests/test_addr.py`, the three
-  in the Node example fail `tests/test_guarded_fetch_node.py`, and the one in the Python example
-  fails `tests/test_guarded_fetch.py`.
+  returned as if whole, responses read with no bound, unpinned https responses read with no bound,
+  the head not bounded, and the end of the bound read as the end of the stream. So far every one in
+  the library fails the build, and the script names the file: a theorem or a build-time example;
+  the one in the CLI fails `tests/test_addr.py`, the three in the Node example fail
+  `tests/test_guarded_fetch_node.py`, and the five in the Python example fail
+  `tests/test_guarded_fetch.py`.
   Some fail only because a proof script no longer fits the changed code, not because a statement
   became false.
   Dropping the userinfo check or the percent check changes only the reason for a rejection, since
@@ -446,11 +459,25 @@ checking addresses; the proxy must then enforce its own address policy. Pinning 
 because it closes the gap the URL check leaves open, at the cost of not working through a proxy.
 
 It does nothing about the port or the path, or what a proxy or the server does with the request
-(see below). It bounds the body (`max_bytes`) and the number of redirects, but `TIMEOUT` applies to
-each socket operation, not to the whole fetch: a server that sends slowly can hold a fetch for much
-longer than `TIMEOUT`. A body that ends before its `Content-Length`, because the connection closed
-early (over TLS also without close_notify), raises `Refused` rather than coming back short, in the
-Node example too.
+(see below). It bounds the body (`max_bytes`), the number of redirects, and what http.client reads
+of each response: at most 64 KiB (`HEAD_BYTES`) for the status line and headers and any
+`100 Continue` responses before them, then at most twice `max_bytes` plus 64 KiB for the body, its
+chunk framing and its trailer fields. A response that needs more raises `Refused`, so a body sent
+in very small chunks (under 5 bytes) is refused rather than cut at `max_bytes` once enough of it
+has come: about a third of `max_bytes`, in chunks of 1 byte. On its own, http.client would read
+any number of `100 Continue` responses, trailer lines after a chunked body and chunk extensions,
+far past `max_bytes`, each socket operation within `TIMEOUT` (seen with Python 3.10.20, 3.11.9,
+3.12.3, 3.12.13 and 3.13.14). With `max_bytes` None or negative, only the head is bounded. This
+counts what http.client reads after TLS, not TLS records. `TIMEOUT` bounds each `urlfence` run,
+each connection attempt (one per address, until one connects), each TLS handshake and each read or
+write on the connection (over TLS, a handshake or a read as a whole), not the whole fetch: there is
+no deadline. Nor does it bound the name lookup: `getaddrinfo` takes no timeout, and only the
+system resolver's own settings end it. A server that sends a byte at a time, each within
+`TIMEOUT`, can hold a response for a `TIMEOUT` per byte that http.client may read under the bounds
+above (about 2.2 million with the defaults: months), and without end with `max_bytes` None or
+negative. A body that ends before its `Content-Length`, because the connection closed early (over
+TLS also without close_notify), raises `Refused` rather than coming back short, in the Node example
+too.
 
 [`examples/guarded_fetch.mjs`](examples/guarded_fetch.mjs) is the same example for Node 18 and
 later (ESM, no dependencies), with the same rules: `await guardedFetch(url, { allow: [...] })`
@@ -496,7 +523,10 @@ Its limits are the Python one's, and: `fetch()` (undici) is neither used nor pin
 made with it is not covered; code that patches `http` or `net` is not guarded against, beyond the
 request having to use the example's socket; `timeout` (10 s by default) bounds each `urlfence` run
 and each period with no socket activity, not the whole fetch; and the body is cut at `maxBytes`
-without saying whether it was cut, as in Python.
+without saying whether it was cut, as in Python. Node's HTTP parser refuses trailer fields longer
+than `--max-http-header-size` (16 KiB by default), but does not limit the number of interim
+responses before the response: with Node 18.19.1, the example read 20,000 `100 Continue` responses
+(500 kB), then the response.
 
 From Lean, build a policy with `UrlFence.Policy.make` and call `Policy.checkString`; for addresses,
 build a `UrlFence.Addr.Config` and call `Config.checkString`.

@@ -32,26 +32,40 @@ through a proxy.
 
 The last response is returned whatever its status (a 404, a 304, a 3xx without `Location`), with
 the body cut at `max_bytes`; a body that ends before its Content-Length, because the connection
-closed early (over TLS also without close_notify), refuses. `TIMEOUT` applies to each socket
-operation, not to the whole fetch.
+closed early (over TLS also without close_notify), refuses. What http.client reads of each response
+is bounded too (`BoundedResponse`): at most HEAD_BYTES (64 KiB) for the head, the status line and
+headers and any `100 Continue` responses before them, and then at most twice `max_bytes` plus
+SLACK_BYTES (64 KiB) for the body, its chunk framing and its trailer fields; a response that needs
+more refuses. With `max_bytes` None or negative only the head is bounded. `TIMEOUT` bounds each
+urlfence run, each connection attempt, each TLS handshake and each read or write on the connection,
+not the name lookup (`getaddrinfo` takes no timeout) nor the whole fetch: a server that sends a byte
+at a time, each within TIMEOUT, can hold a response for a TIMEOUT per byte that the bounds above let
+http.client read, and without end with `max_bytes` None or negative.
 `hops` lists each check: the URL's decision and, pinned, each address's.
 
 What is still not covered: the port and path are not restricted, a server on an allowed address may
 forward the request, and only TCP is pinned. See the README's "What it does not cover".
 """
+import functools
 import http.client
+import io
 import ipaddress
 import json
 import os
 import socket
 import ssl
 import subprocess
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
 
 URLFENCE = os.environ.get("URLFENCE_BIN", "urlfence")
 TIMEOUT = 10
+# What http.client may read of each response (BoundedResponse): HEAD_BYTES for the head, then twice
+# max_bytes plus SLACK_BYTES.
+HEAD_BYTES = 1 << 16
+SLACK_BYTES = 1 << 16
 
 
 class Refused(Exception):
@@ -182,6 +196,87 @@ def read_body(resp, max_bytes):
     return body
 
 
+class TooLarge(http.client.HTTPException):
+    """A response that needs more of the connection than BoundedResponse lets http.client read."""
+
+
+class _Budget(io.RawIOBase):
+    """A socket's bytes as a raw stream that passes on at most `left` of them (None: any number).
+    Reading beyond them raises TooLarge, so that it never looks like the end of the stream."""
+
+    def __init__(self, sock, left, what):
+        super().__init__()
+        self.raw = sock.makefile("rb", buffering=0)
+        self.allow(left, what)
+
+    def allow(self, left, what):
+        self.left, self.what = left, what
+
+    def readable(self):
+        return True
+
+    def fileno(self):
+        return self.raw.fileno()
+
+    def readinto(self, b):
+        if self.left is None:
+            return self.raw.readinto(b)
+        if self.left <= 0:
+            raise TooLarge(self.what)
+        n = self.raw.readinto(memoryview(b)[:self.left])
+        self.left -= n or 0
+        return n
+
+    def close(self):
+        try:
+            self.raw.close()
+        finally:
+            super().close()
+
+
+class BoundedResponse(http.client.HTTPResponse):
+    """http.client's response, reading at most HEAD_BYTES of the connection for its head (the status
+    line and headers, and any `100 Continue` responses before them), then at most `body_bytes` more
+    (None: no limit); a response that needs more raises TooLarge. http.client limits each line to
+    64 KiB and each block of headers to 100 lines, but not how many `100 Continue` responses come
+    first, nor the chunk-size lines (with their extensions) and trailer lines of a chunked body:
+    without this, a server could make it read on without end, far past `max_bytes`, each socket
+    operation well within TIMEOUT. Python's http.client skips only `100 Continue`; any other 1xx
+    (a 103, say) is returned as the response, with no body.
+
+    This relies on what http.client has done since Python 3.0 (read in the sources of 3.10.20,
+    3.11.9, 3.12.3, 3.12.13 and 3.13.14): a connection makes its responses with its
+    `response_class`, a response reads everything through the file that `__init__` gets from
+    `sock.makefile("rb")`, and `begin()` reads the head. The socket handed on here has nothing but
+    `makefile`, so a version that used it in another way would fail rather than read unbounded,
+    though with a TypeError or an AttributeError, which guarded_fetch lets through as it is, not as
+    Refused: it still fails closed."""
+
+    def __init__(self, sock, *args, body_bytes=None, **kwargs):
+        self._budget = _Budget(sock, HEAD_BYTES, f"the response head is longer than {HEAD_BYTES} bytes")
+        self._body_bytes = body_bytes
+        reader = io.BufferedReader(self._budget)
+        super().__init__(types.SimpleNamespace(makefile=lambda mode: reader), *args, **kwargs)
+
+    def begin(self):
+        started = self.headers is not None
+        super().begin()
+        if not started:
+            n = self._body_bytes
+            self._budget.allow(n, f"the response is longer than {n} bytes after its head")
+
+
+def bounded(conn, max_bytes):
+    """`conn`, an http.client connection, made to read its responses with BoundedResponse: after
+    the head, at most twice `max_bytes` plus SLACK_BYTES for the body, its chunk framing and its
+    trailer fields (no limit when `max_bytes` is None or negative). That always fits a body whose
+    chunk framing is no longer than the body itself (as with chunks of 5 bytes or more, without
+    extensions), then a last chunk and trailer fields of up to 64 KiB in all."""
+    body = None if max_bytes is None or max_bytes < 0 else 2 * max_bytes + SLACK_BYTES
+    conn.response_class = functools.partial(BoundedResponse, body_bytes=body)
+    return conn
+
+
 class PinnedHTTPConnection(http.client.HTTPConnection):
     """http.client's connection for `host`, over a socket to the checked address `addr`."""
 
@@ -247,6 +342,7 @@ def pinned_get(url, r, hop, hops, deny_addr, nat64, context, max_bytes):
             conn = PinnedHTTPSConnection(host, port_n, a["addr"], context or ssl.create_default_context())
         else:
             conn = PinnedHTTPConnection(host, port_n, a["addr"])
+        bounded(conn, max_bytes)
         try:
             try:
                 conn.connect()
@@ -269,6 +365,27 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None  # hand the 3xx back to guarded_fetch, which checks Location first
 
 
+class _Bounding:
+    """A urllib handler whose connections read their responses with BoundedResponse. It relies on
+    urllib's `do_open(http_class, req, **kwargs)` making the connection with
+    `http_class(host, timeout=..., **kwargs)` (read in the same sources as BoundedResponse)."""
+
+    def __init__(self, max_bytes):
+        super().__init__()
+        self.max_bytes = max_bytes
+
+    def do_open(self, http_class, req, **kwargs):
+        return super().do_open(lambda *a, **kw: bounded(http_class(*a, **kw), self.max_bytes), req, **kwargs)
+
+
+class BoundedHTTPHandler(_Bounding, urllib.request.HTTPHandler):
+    pass
+
+
+class BoundedHTTPSHandler(_Bounding, urllib.request.HTTPSHandler):
+    pass
+
+
 def guarded_fetch(url, allow, deny=(), schemes=("https",), max_redirects=3, proxies=None, max_bytes=1 << 20,
                   pin=True, deny_addr=(), nat64=(), context=None):
     """`(status, body, hops)` for the last response, or `Refused`. `deny_addr` and `nat64` are
@@ -277,7 +394,9 @@ def guarded_fetch(url, allow, deny=(), schemes=("https",), max_redirects=3, prox
     if pin and proxies is not None:
         raise ValueError("a proxy resolves the name itself, so nothing can be pinned: pass pin=False to use one")
     _strings(deny_addr=deny_addr, nat64=nat64)
-    opener = None if pin else urllib.request.build_opener(urllib.request.ProxyHandler(proxies), NoRedirect())
+    opener = None if pin else urllib.request.build_opener(
+        urllib.request.ProxyHandler(proxies), NoRedirect(), BoundedHTTPHandler(max_bytes),
+        BoundedHTTPSHandler(max_bytes))
     hops = []
     for _ in range(max_redirects + 1):
         r = check(url, allow, deny, schemes)

@@ -97,6 +97,15 @@ MUTANTS = {
     "P1 Python example: a body shorter than its Content-Length returned as if whole": [
         (PY_EXAMPLE, "    if left and len(body) != max_bytes:  # also for max_bytes None or negative, which read it all\n"
          "        raise http.client.IncompleteRead(body, left)\n", "")],
+    "P2 Python example: responses read with no bound (trailer lines, 100 Continue)": [
+        (PY_EXAMPLE, "    conn.response_class = functools.partial(BoundedResponse, body_bytes=body)\n", "")],
+    "P3 Python example: the head not bounded": [
+        (PY_EXAMPLE, "        self._budget = _Budget(sock, HEAD_BYTES, ", "        self._budget = _Budget(sock, None, ")],
+    "P4 Python example: the end of the bound read as the end of the stream": [
+        (PY_EXAMPLE, "            raise TooLarge(self.what)\n", "            return 0\n")],
+    "P5 Python example: unpinned https responses read with no bound": [
+        (PY_EXAMPLE, "BoundedHTTPHandler(max_bytes),\n        BoundedHTTPSHandler(max_bytes))\n",
+         "BoundedHTTPHandler(max_bytes))\n")],
 }
 
 

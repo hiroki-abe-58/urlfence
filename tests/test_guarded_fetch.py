@@ -12,8 +12,18 @@ machine.
   ends on 127.0.0.1. The fixture records what each connection brings first (an HTTP request head,
   or a TLS ClientHello, answered with a fatal alert). For one https test, an origin with a
   throwaway self-signed certificate (made with openssl for the run) completes the handshake.
+* In memory (`Bounds`): `gf.open_socket` returns a connection in memory that answers with given
+  bytes and counts how many of them the fetch read, so that the bounds on what http.client reads of
+  a response can be checked exactly.
 
-Unusable answers from the binary are simulated by replacing `subprocess.run`."""
+Some answers (RAW) are sent as they are: chunked bodies with trailer fields, and `100 Continue`
+responses before the response, a few or a flood of them.
+
+Unusable answers from the binary are simulated by replacing `subprocess.run`. Whatever a test
+replaces, tests/common.py refuses any connection beyond loopback and any lookup of a name
+(`Confinement` checks it)."""
+import http.client
+import io
 import os
 import shutil
 import socket
@@ -23,10 +33,13 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import types
 import unittest
 import urllib.request
 from unittest import mock
 
+import common
 import compat
 from common import BIN, ROOT
 
@@ -51,6 +64,20 @@ PAGES = {
 }
 for code in (301, 302, 303, 307, 308):
     PAGES[("docs.example.com", f"/leave{code}")] = (code, {"Location": "http://evil.example.net/collect"}, b"")
+CHUNKED = b"HTTP/1.1 200 X\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n"
+CONTINUE = b"HTTP/1.1 100 Continue\r\n\r\n"
+HELLO = b"HTTP/1.1 200 X\r\nConnection: close\r\nContent-Length: 5\r\n\r\nhello"
+FLOOD_LINE = b"X-Flood: " + b"a" * 29 + b"\r\n"  # 40 bytes
+RAW = {
+    "/trailers": CHUNKED + b"5\r\nhello\r\n0\r\nX-A: 1\r\nX-B: 2\r\nX-C: 3\r\n\r\n",
+    "/trailer-flood": CHUNKED + b"5\r\nhello\r\n0\r\n" + FLOOD_LINE * 5000 + b"\r\n",  # 200 kB of trailer lines
+    "/interim": CONTINUE * 3 + HELLO,
+    "/interim-flood": CONTINUE * 5000 + HELLO,  # 125 kB of 100 Continue
+}
+PAGES.update({("docs.example.com", path): answer for path, answer in RAW.items()})
+# The floods, and what each refuses with: for the trailers, a max_bytes small enough that what may
+# be read after the head, twice max_bytes plus 64 KiB, is less than the flood.
+FLOODS = (("/trailer-flood", {"max_bytes": 1000}), ("/interim-flood", {}))
 ALLOW = dict(allow=["docs.example.com"], schemes=("http",))
 # Bodies cut short of their Content-Length, which refuse, and answers that are not cut short, which
 # do not: a body cut at max_bytes (also at 0), a 304 and a complete 404.
@@ -79,6 +106,38 @@ def throwaway_cert(test, san):
     return cert, key
 
 
+def no_fd_left(test, fetch):
+    """Each refused fetch (`fetch(path, kw)`: a flood, a short body) closes what it opened: once the
+    fixture's threads for its connections are done, /proc/self/fd holds as many as before, while the
+    exception is kept with its traceback, and so every frame of the fetch, and whatever one still
+    holds, is alive."""
+    if not os.path.isdir("/proc/self/fd"):
+        test.skipTest("no /proc/self/fd")
+
+    def settled():
+        # socketserver runs each connection in a thread named after process_request_thread, which
+        # closes the connection before it ends.
+        deadline = time.monotonic() + 5
+        while (any("process_request_thread" in t.name for t in threading.enumerate())
+               and time.monotonic() < deadline):
+            time.sleep(0.01)
+        return len(os.listdir("/proc/self/fd"))
+
+    fetch("/guide", {})  # whatever a first fetch opens for good is open from now on
+    before = settled()
+    for path, kw in FLOODS + (("/short", {}),):
+        with test.subTest(path=path):
+            try:
+                fetch(path, kw)
+            except gf.Refused as e:
+                kept = e
+            else:
+                test.fail("not refused")
+            test.assertEqual(settled(), before)
+            test.assertIsNotNone(kept.__traceback__)
+            del kept
+
+
 class Web:
     """The stand-in web: an HTTP proxy on 127.0.0.1 answering from PAGES."""
 
@@ -94,7 +153,14 @@ class Web:
                 web.requests.append(line)
                 target = (line.split(" ") + ["", ""])[1]
                 auth, _, path = target.removeprefix("http://").partition("/")
-                status, headers, body = PAGES.get((auth, "/" + path.split("?")[0]), (404, {}, b"not found"))
+                page = PAGES.get((auth, "/" + path.split("?")[0]), (404, {}, b"not found"))
+                if isinstance(page, bytes):  # an answer to send as it is
+                    try:
+                        self.wfile.write(page)
+                    except OSError:  # the client stopped reading
+                        pass
+                    return
+                status, headers, body = page
                 head = f"HTTP/1.1 {status} X\r\nConnection: close\r\n"
                 if "Transfer-Encoding" not in headers and "Content-Length" not in headers:
                     head += f"Content-Length: {len(body)}\r\n"
@@ -203,6 +269,21 @@ class GuardedFetch(unittest.TestCase):
             with self.subTest(path=path, **kw):
                 self.assertEqual(self.fetch("http://docs.example.com" + path, **kw)[:2], answer)
 
+    def test_a_flood_of_trailers_or_of_100_continue_refuses(self):
+        for path, kw in FLOODS:
+            with self.subTest(path=path):
+                start = time.monotonic()
+                with self.assertRaises(gf.Refused) as cm:
+                    self.fetch("http://docs.example.com" + path, **kw)
+                self.assertIn("request failed", str(cm.exception))
+                self.assertLess(time.monotonic() - start, 5)
+        for path in ("/trailers", "/interim"):
+            with self.subTest(path=path):
+                self.assertEqual(self.fetch("http://docs.example.com" + path)[:2], (200, b"hello"))
+
+    def test_a_refused_fetch_leaves_no_file_descriptor_open(self):
+        no_fd_left(self, lambda path, kw: self.fetch("http://docs.example.com" + path, **kw))
+
 
 class Origin:
     """The stand-in origin servers for pinned fetches: one TCP listener on 127.0.0.1 that records the
@@ -242,12 +323,16 @@ class Origin:
                     lines = data.split(b"\r\n\r\n", 1)[0].decode("latin-1").split("\r\n")
                     path = (lines[0].split(" ") + ["", ""])[1].split("?")[0]
                     host = (compat.header(lines, "Host") or "").rsplit(":", 1)[0]
-                    status, headers, body = PAGES.get((host, path), (404, {}, b"not found"))
-                    head = f"HTTP/1.1 {status} X\r\nConnection: close\r\n"
-                    if "Content-Length" not in headers:
-                        head += f"Content-Length: {len(body)}\r\n"
-                    head += "".join(f"{k}: {v}\r\n" for k, v in headers.items())
-                    answer = head.encode() + b"\r\n" + body
+                    page = PAGES.get((host, path), (404, {}, b"not found"))
+                    if isinstance(page, bytes):  # an answer to send as it is
+                        answer = page
+                    else:
+                        status, headers, body = page
+                        head = f"HTTP/1.1 {status} X\r\nConnection: close\r\n"
+                        if "Content-Length" not in headers:
+                            head += f"Content-Length: {len(body)}\r\n"
+                        head += "".join(f"{k}: {v}\r\n" for k, v in headers.items())
+                        answer = head.encode() + b"\r\n" + body
                 try:
                     conn.sendall(answer)
                 except OSError:
@@ -396,6 +481,34 @@ class Pinned(unittest.TestCase):
             self.fetch("https://docs.example.com/short", answers, **https)
         self.assertIn("request failed", str(cm.exception))
 
+    def test_a_flood_of_trailers_or_of_100_continue_refuses(self):
+        answers = {"docs.example.com": [["8.8.8.8"]]}
+        for path, kw in FLOODS:
+            with self.subTest(path=path):
+                start = time.monotonic()
+                with self.assertRaises(gf.Refused) as cm:
+                    self.fetch("http://docs.example.com" + path, answers, **kw)
+                self.assertIn("request failed", str(cm.exception))
+                self.assertLess(time.monotonic() - start, 5)
+        for path in ("/trailers", "/interim"):
+            with self.subTest(path=path):
+                self.assertEqual(self.fetch("http://docs.example.com" + path, answers)[:2], (200, b"hello"))
+        no_fd_left(self, lambda path, kw: self.fetch("http://docs.example.com" + path, answers, **kw))
+
+    def test_a_flood_over_https_refuses(self):
+        files = throwaway_cert(self, "DNS:docs.example.com")
+        self.origin.close()
+        self.origin = Origin(files)
+        https = dict(schemes=("https",), context=ssl.create_default_context(cafile=files[0]))
+        answers = {"docs.example.com": [["8.8.8.8"]]}
+        for path in ("/trailers", "/interim"):
+            with self.subTest(path=path):
+                self.assertEqual(self.fetch("https://docs.example.com" + path, answers, **https)[:2], (200, b"hello"))
+        for path, kw in FLOODS:
+            with self.subTest(path=path), self.assertRaises(gf.Refused):
+                self.fetch("https://docs.example.com" + path, answers, **https, **kw)
+        no_fd_left(self, lambda path, kw: self.fetch("https://docs.example.com" + path, answers, **https, **kw))
+
     def test_https_uses_the_url_host_as_server_name(self):
         with self.assertRaises(gf.Refused):  # the fixture ends the handshake with an alert
             self.fetch("https://docs.example.com/guide", {"docs.example.com": [["8.8.8.8"]]}, schemes=("https",))
@@ -465,6 +578,263 @@ class RealOpenSocket(unittest.TestCase):
         self.assertEqual(lookups, [])
         with self.assertRaises(socket.timeout):
             listener.accept()  # nothing else connected
+
+
+class Stream(io.RawIOBase):
+    """Bytes as a raw stream, counting how many of them have been read (`taken`)."""
+
+    def __init__(self, data):
+        super().__init__()
+        self.data, self.taken = data, 0
+
+    def readable(self):
+        return True
+
+    def readinto(self, b):
+        n = min(len(b), len(self.data) - self.taken)
+        b[:n] = self.data[self.taken:self.taken + n]
+        self.taken += n
+        return n
+
+
+class FakeSocket:
+    """A connection in memory: what is sent goes to `sent`, what is read comes from `stream`."""
+
+    def __init__(self, data):
+        self.stream, self.sent, self.closed = Stream(data), b"", False
+
+    def sendall(self, data):
+        self.sent += data
+
+    def makefile(self, mode, buffering=None):
+        return self.stream if buffering == 0 else io.BufferedReader(self.stream)
+
+    def close(self):
+        self.closed = True
+
+
+def chunks(body, size, ext=b""):
+    """`body` in chunks of `size` bytes, each size line with the extension `ext`, then the last
+    chunk: a chunked body up to its trailer fields."""
+    parts = (body[i:i + size] for i in range(0, len(body), size))
+    return b"".join(b"%x%s\r\n%s\r\n" % (len(p), ext, p) for p in parts) + b"0\r\n"
+
+
+def head_of(n):
+    """A response with a 5-byte body whose head, the status line to the empty line, is `n` bytes."""
+    start = b"HTTP/1.1 200 X\r\nConnection: close\r\nContent-Length: 5\r\nX-Pad: "
+    return start + b"p" * (n - len(start) - 4) + b"\r\n\r\nhello"
+
+
+class Bounds(unittest.TestCase):
+    """What http.client may read of a response, in pinned fetches over a connection in memory, where
+    how much of an answer was read is exact: a flood of trailer lines, of `100 Continue` responses
+    or of chunk framing refuses once its bound is reached; ordinary answers do not; and
+    BoundedResponse reads an answer as http.client's own response does."""
+
+    def setUp(self):
+        self.socks = []
+
+        def open_socket(addr, port):
+            self.socks.append(FakeSocket(self.answer))
+            return self.socks[-1]
+
+        def getaddrinfo(host, port, *args, **kwargs):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", port))]
+
+        for patch in (mock.patch.object(socket, "getaddrinfo", getaddrinfo),
+                      mock.patch.object(gf, "open_socket", open_socket),
+                      mock.patch.object(urllib.request, "getproxies", lambda: {})):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def fetch(self, answer, **kw):
+        """(status, body) of a pinned fetch answered with `answer`; `self.taken` is how much of it
+        was read. The connection and the response's file must be closed, whatever happened."""
+        self.answer = answer
+        try:
+            return gf.guarded_fetch("http://docs.example.com/x", **{**ALLOW, **kw})[:2]
+        finally:
+            s = self.socks[-1]
+            self.taken = s.stream.taken
+            self.assertTrue(s.closed and s.stream.closed)
+
+    def test_a_flood_of_trailer_lines_refuses_after_a_bounded_read(self):
+        flood = CHUNKED + b"0\r\n" + FLOOD_LINE * 60_000 + b"\r\n"  # an empty body, then 2.4 MB of trailer lines
+        for max_bytes in (0, 1000, 100_000, 1 << 20):  # 1 MiB is the default
+            with self.subTest(max_bytes=max_bytes):
+                with self.assertRaises(gf.Refused) as cm:
+                    self.fetch(flood, max_bytes=max_bytes)
+                self.assertIn("after its head", str(cm.exception))
+                self.assertLessEqual(self.taken, gf.HEAD_BYTES + 2 * max_bytes + gf.SLACK_BYTES)
+
+    def test_a_flood_of_100_continue_refuses_after_a_bounded_read(self):
+        for kw in ({}, {"max_bytes": None}):  # the head is bounded whatever max_bytes is
+            with self.subTest(**kw):
+                with self.assertRaises(gf.Refused) as cm:
+                    self.fetch(CONTINUE * 5000 + HELLO, **kw)  # 125 kB
+                self.assertIn("head is longer", str(cm.exception))
+                self.assertLessEqual(self.taken, gf.HEAD_BYTES)
+
+    def test_a_flood_of_chunk_framing_refuses_after_a_bounded_read(self):
+        # Chunks of 1 byte, each size line with a 1000-byte extension: 1004 bytes read for each byte
+        # of the body.
+        flood = CHUNKED + chunks(b"z" * 300, 1, b";x=" + b"e" * 995) + b"\r\n"
+        with self.assertRaises(gf.Refused):
+            self.fetch(flood, max_bytes=100)
+        self.assertLessEqual(self.taken, gf.HEAD_BYTES + 2 * 100 + gf.SLACK_BYTES)
+
+    def test_unpinned_a_flood_refuses_after_a_bounded_read_over_http_and_https(self):
+        # Unpinned, urllib makes the connection, through BoundedHTTPHandler for http and
+        # BoundedHTTPSHandler for https. Here both connection classes take the connection in memory
+        # instead (so no TLS), and each handler must bound what the response reads.
+        made = []
+
+        def connect(conn):
+            made.append(type(conn))
+            conn.sock = FakeSocket(self.answer)
+            self.socks.append(conn.sock)
+
+        for cls in (http.client.HTTPConnection, http.client.HTTPSConnection):
+            patch = mock.patch.object(cls, "connect", connect)
+            patch.start()
+            self.addCleanup(patch.stop)
+        flood = CHUNKED + b"0\r\n" + FLOOD_LINE * 60_000 + b"\r\n"  # an empty body, then 2.4 MB of trailer lines
+        for scheme, cls in (("http", http.client.HTTPConnection), ("https", http.client.HTTPSConnection)):
+            with self.subTest(scheme=scheme):
+                url = f"{scheme}://docs.example.com/x"
+                kw = dict(allow=["docs.example.com"], schemes=(scheme,), pin=False, proxies={})
+                self.answer = RAW["/trailers"]
+                self.assertEqual(gf.guarded_fetch(url, **kw)[:2], (200, b"hello"))
+                self.answer = flood
+                with self.assertRaises(gf.Refused) as cm:
+                    gf.guarded_fetch(url, max_bytes=1000, **kw)
+                self.assertIn("after its head", str(cm.exception))
+                s = self.socks[-1]
+                self.assertLessEqual(s.stream.taken, gf.HEAD_BYTES + 2000 + gf.SLACK_BYTES)
+                self.assertTrue(s.stream.closed)
+                self.assertEqual(made[-1], cls)
+
+    def test_ordinary_answers_are_not_refused(self):
+        body = bytes(range(256)) * 4096  # 1 MiB, the default max_bytes
+        cases = [
+            (RAW["/trailers"], {}, (200, b"hello")),
+            (RAW["/interim"], {}, (200, b"hello")),
+            # Trailer fields of 60 KiB.
+            (CHUNKED + b"5\r\nhello\r\n0\r\nX-T: " + b"t" * 61_433 + b"\r\n\r\n", {"max_bytes": 1000}, (200, b"hello")),
+            # 1000 bytes in chunks of 5: as many bytes of framing as of body.
+            (CHUNKED + chunks(body[:1000], 5) + b"\r\n", {"max_bytes": 1000}, (200, body[:1000])),
+            # 1 MiB in chunks of 100 bytes and a trailer field; 2 MiB in 8 KiB chunks, cut at 1 MiB.
+            (CHUNKED + chunks(body, 100) + b"X-A: 1\r\n\r\n", {}, (200, body)),
+            (CHUNKED + chunks(body + body, 8192) + b"\r\n", {}, (200, body)),
+        ]
+        for answer, kw, expected in cases:
+            with self.subTest(answer=answer[70:100], **kw):
+                self.assertEqual(self.fetch(answer, **kw), expected)
+
+    def test_the_head_may_take_exactly_head_bytes(self):
+        self.assertEqual(self.fetch(head_of(gf.HEAD_BYTES)), (200, b"hello"))
+        with self.assertRaises(gf.Refused):
+            self.fetch(head_of(gf.HEAD_BYTES + 1))
+        self.assertEqual(self.taken, gf.HEAD_BYTES)
+
+    def test_a_response_is_read_as_http_client_reads_it(self):
+        # The same answers read by http.client's own response and by BoundedResponse, as `bounded`
+        # sets it up for each max_bytes: the same status, headers, body (or exception), framing
+        # state and number of bytes read, whether the connection is kept alive or not.
+        answers = [
+            # Kept alive, with the next response behind.
+            b"HTTP/1.1 200 X\r\nContent-Length: 5\r\n\r\nhelloHTTP/1.1 200 X\r\nContent-Length: 2\r\n\r\nno",
+            b"HTTP/1.1 200 X\r\nTransfer-Encoding: chunked\r\n\r\n" + chunks(b"hello world", 4, b";a=b")
+            + b"X-A: 1\r\n\r\nHTTP/1.1 204 X\r\n\r\n",
+            RAW["/trailers"], RAW["/interim"], HELLO, CHUNKED + chunks(b"no trailers", 3) + b"\r\n",
+            b"HTTP/1.0 200 X\r\n\r\nread until the connection closes",
+            b"HTTP/1.1 204 X\r\nContent-Length: 3\r\n\r\nabc", b"HTTP/1.1 304 X\r\nContent-Length: 100\r\n\r\n",
+            b"HTTP/1.1 200 X\r\nContent-Length: 100\r\n\r\nshort", CHUNKED + b"5\r\nhel",
+        ]
+
+        def read(response_class, data, max_bytes):
+            s = FakeSocket(data)
+            r = response_class(s, method="GET")
+            r.begin()
+            try:
+                body = r.read(max_bytes)
+            except http.client.HTTPException as e:
+                body = type(e)
+            out = (r.status, r.reason, r.version, list(r.headers.items()), body, r.chunked, r.length,
+                   r.will_close, r.isclosed(), s.stream.taken)
+            r.close()
+            return out
+
+        for data in answers:
+            for max_bytes in (0, 3, 1000, None):
+                with self.subTest(data=data[:40], max_bytes=max_bytes):
+                    bounded = gf.bounded(types.SimpleNamespace(), max_bytes).response_class
+                    self.assertEqual(read(bounded, data, max_bytes), read(http.client.HTTPResponse, data, max_bytes))
+
+
+class Confinement(unittest.TestCase):
+    """tests/common.py's guard, through the code paths the tests use: a connection to 192.0.2.1
+    (TEST-NET-1), plain or for TLS, made by the example, http.client, urllib or ssl, and a lookup of a
+    name, are refused with Outbound before they are made."""
+
+    def setUp(self):
+        # A connect to 0.0.0.0 would reach this listener on 127.0.0.1. It is refused and nothing
+        # arrives, so the guard is in place, and stops a connect before it is made, before anything
+        # below tries 192.0.2.1.
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(5)
+        listener.settimeout(0.2)
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(probe.close)
+        self.refused(lambda: probe.connect(("0.0.0.0", listener.getsockname()[1])), "0.0.0.0")
+        with self.assertRaises(socket.timeout):
+            listener.accept()
+        patch = mock.patch.object(urllib.request, "getproxies", lambda: {})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def refused(self, attempt, target):
+        before = len(common.OUTBOUND)
+        with self.assertRaises(common.Outbound):
+            attempt()
+        new = common.OUTBOUND[before:]
+        self.assertEqual(len(new), 1, new)
+        self.assertIn(target, repr(new[0][1]))
+
+    def test_plain(self):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self.refused(lambda: gf.open_socket("192.0.2.1", 80), "192.0.2.1")
+        self.refused(lambda: http.client.HTTPConnection("192.0.2.1", 80, timeout=1).request("GET", "/"), "192.0.2.1")
+        self.refused(lambda: opener.open("http://192.0.2.1/", timeout=1), "192.0.2.1")
+        self.refused(lambda: gf.guarded_fetch("http://192.0.2.1/", allow=["192.0.2.1"], schemes=("http",), pin=False,
+                                              proxies={}), "192.0.2.1")
+
+    def test_tls(self):
+        context = ssl.create_default_context()
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        tls = context.wrap_socket(socket.socket(socket.AF_INET, socket.SOCK_STREAM), server_hostname="docs.example.com")
+        self.addCleanup(tls.close)
+        self.refused(lambda: gf.PinnedHTTPSConnection("docs.example.com", 443, "192.0.2.1", context).connect(),
+                     "192.0.2.1")
+        self.refused(lambda: tls.connect(("192.0.2.1", 443)), "192.0.2.1")
+        self.refused(lambda: http.client.HTTPSConnection("192.0.2.1", 443, timeout=1, context=context).request("GET", "/"),
+                     "192.0.2.1")
+        self.refused(lambda: opener.open("https://192.0.2.1/", timeout=1), "192.0.2.1")
+
+    def test_names_are_not_looked_up(self):
+        # As if a test forgot to replace getaddrinfo: the lookup itself is refused, here also for a
+        # pinned fetch, which resolves the host with getaddrinfo. The name is under .invalid, so
+        # that even with a broken guard, a query that does go out cannot resolve it to anything.
+        name = "docs.example.invalid"
+        plain = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.addCleanup(plain.close)
+        self.refused(lambda: socket.getaddrinfo(name, 443), name)
+        self.refused(lambda: socket.gethostbyname(name), name)
+        self.refused(lambda: plain.connect((name, 80)), name)
+        self.refused(lambda: gf.guarded_fetch(f"http://{name}/guide", allow=[name], schemes=("http",)), name)
 
 
 def urlfence_says(code, stdout, stderr=b""):
